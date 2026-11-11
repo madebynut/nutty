@@ -1424,7 +1424,9 @@ async fn copy(
     progress: &Sender<u64>,
     limit: Option<std::num::NonZeroU64>,
 ) -> Result<()> {
-    let mut buffer = [0; 64 * 1024];
+    // This buffer lives across awaits. Keeping it inside the future multiplies
+    // stack moves through upload/download/select on Windows' smaller thread stacks.
+    let mut buffer = vec![0; 64 * 1024];
     let mut copied = 0;
     let started = tokio::time::Instant::now();
     // Small chunks keep cancellation and progress responsive at low limits.
@@ -1488,6 +1490,18 @@ async fn socks_target(stream: &mut TcpStream) -> Result<(String, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transfer_future_keeps_the_io_buffer_off_the_thread_stack() {
+        let mut source = tokio::io::empty();
+        let mut destination = tokio::io::sink();
+        let cancel = CancellationToken::new();
+        let (progress, _) = async_channel::bounded(1);
+        let transfer = copy(&mut source, &mut destination, &cancel, &progress, None);
+        assert!(
+            std::mem::size_of_val(&transfer) < 8 * 1024,
+            "bounded transfer buffer must be heap-allocated"
+        );
+    }
     #[test]
     fn jump_routes_are_ordered_and_cycles_fail_before_connecting() -> Result<()> {
         let a = Uuid::from_u128(1);
