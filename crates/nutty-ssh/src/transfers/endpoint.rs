@@ -5,7 +5,9 @@ use russh_sftp::{
     protocol::{FileAttributes, OpenFlags, Packet, StatusCode},
 };
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Arc};
+#[cfg(unix)]
+use std::path::Path;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
 /// A protocol-sized buffer bounds each transfer independently of file size.
@@ -97,7 +99,7 @@ pub(super) enum File {
     },
 }
 pub(super) enum Directory {
-    Local(tokio::fs::ReadDir),
+    Local(Box<tokio::fs::ReadDir>),
     Remote {
         session: Arc<RawSftpSession>,
         handle: String,
@@ -411,7 +413,7 @@ impl Endpoint {
             "目录不存在或是符号链接"
         );
         match self {
-            Self::Local => Ok(Directory::Local(tokio::fs::read_dir(path).await?)),
+            Self::Local => Ok(Directory::Local(Box::new(tokio::fs::read_dir(path).await?))),
             Self::Remote(s) => Ok(Directory::Remote {
                 session: s.clone(),
                 handle: s.opendir(path).await?.handle,
@@ -423,7 +425,9 @@ impl Endpoint {
     pub async fn mkdir(&self, path: &str) -> Result<()> {
         match self {
             Self::Local => {
-                let mut b = tokio::fs::DirBuilder::new();
+                let b = tokio::fs::DirBuilder::new();
+                #[cfg(unix)]
+                let mut b = b;
                 #[cfg(unix)]
                 b.mode(0o700);
                 b.create(path).await?;
