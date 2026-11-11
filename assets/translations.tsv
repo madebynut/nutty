@@ -1,0 +1,982 @@
+AI 提供方	AI providers
+AI 模型	AI model
+API 地址	API endpoint
+API 密钥 · 留空保留，Ollama 可留空	API key · Leave blank to keep; optional for Ollama
+Agent 模式	Agent mode
+Agent 请求执行工具	Agent requests tool execution
+Bearer Token · 留空保留	Bearer token · Leave blank to keep
+MCP 程序	MCP process
+MCP · 已启用	MCP · Enabled
+MCP · 已禁用	MCP · Disabled
+ACP · 已启用	ACP · Enabled
+ACP · 已禁用	ACP · Disabled
+ · 已禁用	 · Disabled
+SSH 支持 HTTP CONNECT 与 SOCKS5；AI 提供方可选择 HTTP、HTTPS 或 SOCKS5 代理。	SSH supports HTTP CONNECT and SOCKS5. AI providers also support HTTPS proxies.
+SSH 身份认证	SSH authentication
+SSH 连接	SSH connections
+Shell 模式	Shell mode
+Skills 目录	Skills directories
+Skills 目录：{}	Skills directories: {}
+Streamable HTTP 地址	Streamable HTTP endpoint
+{} · {} 个模型{}	{} · {} models{}
+{} · 原生终端工作区	{} · Native terminal workspace
+{} 会话   ·   UTF-8   ·   {}	{} sessions   ·   UTF-8   ·   {}
+上下分屏	Split vertically
+左右分屏	Split horizontally
+上传	Upload
+上级目录	Parent directory
+下载选中文件	Download selected file
+主机	Host
+仅发送到此窗格	Send to this pane
+仍有 {} 个终端会话和 {} 个连接任务。退出将结束终端、AI 会话及传输任务。	{} terminal sessions and {} connection jobs are active. Quitting ends terminals, AI sessions and transfers.
+从这个终端开始	Start with this terminal
+代理 ID · 可选，在代理配置列表中选择后复制 ID	Proxy ID · Optional
+代理 ID 无效	Invalid proxy ID
+代理地址 · http / https / socks5h	Proxy URL · http / https / socks5h
+代理密码 · 留空保留	Proxy password · Leave blank to keep
+传输中	Transferring
+你	You
+保存	Save
+保存中…	Saving…
+保存命令历史	Save command history
+保存终端会话日志	Save terminal logs
+保存设置	Save settings
+保存连接	Save connection
+保活失败次数无效	Invalid keepalive failure limit
+保活间隔无效	Invalid keepalive interval
+保活间隔（秒，0 关闭）	Keepalive interval (seconds; 0 disables)
+允许保活失败次数	Keepalive failure limit
+信任并连接	Trust and connect
+停止	Stop
+停止转发	Stop forwarding
+关于 Nutty	About Nutty
+关闭	Close
+关闭当前窗格	Close current pane
+关闭消息	Dismiss message
+关闭窗格	Close pane
+再次执行	Run again
+凭据过长	Credentials exceed the size limit
+分组	Group
+列出 Skills	List Skills
+刷新	Refresh
+加载 Skill	Load Skill
+协议	Protocol
+参数必须是 JSON 字符串数组	Arguments must be a JSON array of strings
+发送	Send
+发送命令	Send command
+取消	Cancel
+取消传输	Cancel transfer
+名称	Name
+启动目录	Startup directory
+启用	Enabled
+启用此提供方	Enable this provider
+命令发送器	Command composer
+命令面板	Command palette
+命令面板…	Command palette…
+复制 / 粘贴	Copy / paste
+多行命令、管道、脚本… Enter 换行	Multiline commands, pipes, scripts… Enter adds a line
+字体大小必须介于 8 和 32 之间	Font size must be between 8 and 32
+字号	Font size
+完成	Completed
+密码	Password
+密码 · 保存在系统钥匙串	Password · Stored in the system keychain
+对话绑定此终端 · Enter 换行	Conversation belongs to this terminal · Enter adds a line
+工作区	Workspace
+工作目录	Working directory
+工作目录不存在	Working directory does not exist
+工具调用显示参数供你确认。连接、工具结果和代理会话随所属终端结束或重置。	Review tool arguments before execution. Connections, results and agent sessions end or reset with their terminal.
+已发送到终端	Sent to terminal
+已完成	Completed
+已拒绝	Rejected
+帮助	Help
+常规	General
+广播到当前标签的终端	Broadcast to terminals in this tab
+广播输入已开启	Broadcast input enabled
+待发送 · 此窗格	Ready to send · This pane
+待确认 · 执行前请检查参数	Review arguments before execution
+打开本地终端	Open local terminal
+执行工具	Execute tool
+拒绝	Reject
+接管终端输出作为模型上下文	Include terminal output in model context
+推理强度	Reasoning effort
+推理强度名称无效	Invalid reasoning effort
+提供方	Provider
+提供方不存在	Provider no longer exists
+搜索操作…	Search actions…
+搜索终端 · 正则表达式	Search terminal · Regular expression
+搜索连接	Search connections
+收起面板	Hide panel
+放弃修改	Discard changes
+文件	Files
+文件已保存	File saved
+断开共享 SSH 节点	Disconnect shared SSH connection
+新建会话	New conversation
+新建本地终端	New local terminal
+新建终端	New terminal
+新建终端 · ⌘T	New terminal · ⌘T
+新建连接	New connection
+显示 / 隐藏连接导航	Toggle connection sidebar
+显示全部	Show all
+最多同时传输两个文件	At most two concurrent transfers
+最多重连次数（0–10）	Reconnect attempt limit (0–10)
+服务	Services
+未配置	Not configured
+本地	Local
+本地 Shell	Local shell
+本地终端	Local terminal
+本地转发	Local forwarding
+查找…	Find…
+查找终端	Find in terminal
+模型	Model
+模型与可用推理强度	Models and supported reasoning efforts
+正在思考…	Thinking…
+正在执行…	Executing…
+正在执行工具…	Executing tool…
+此命令需要手动执行确认	This command requires manual execution
+此终端的 AI 会话	AI conversation for this terminal
+每个终端独立选择提供方、模型与推理强度。密钥保存在系统钥匙串。	Choose a provider, model and reasoning effort per terminal. Keys are stored in the system keychain.
+每次提问发送此窗格最近 120 行，最多 32 KiB；输出不自动触发请求。	Each question includes this pane's last 120 lines, up to 32 KiB. Output does not trigger requests.
+每行一个模型：model-id | Auto,Low,Medium,High	One model per line: model-id | Auto,Low,Medium,High
+每行一个目录；目录内各 Skill 使用独立文件夹和 SKILL.md。	One directory per line. Each Skill has its own folder and SKILL.md.
+每行：模型名称 | Auto,Low,Medium,High。仅填写模型名称时使用 Auto。	One per line: model-id | Auto,Low,Medium,High. A model name alone uses Auto.
+没有匹配	No matches
+浅色	Light
+添加 ACP Agent	Add ACP Agent
+添加 MCP HTTP	Add MCP HTTP
+添加 MCP 程序	Add MCP process
+添加代理	Add proxy
+添加提供方	Add provider
+清空屏幕	Clear screen
+滚动历史最多为 100000 行	Scrollback is limited to 100,000 lines
+滚动历史行数	Scrollback lines
+独立设计与实现 · MIT License	Independently designed and implemented · MIT License
+环境变量 · JSON 对象，保存在钥匙串，留空保留	Environment · JSON object; stored in keychain; blank keeps existing values
+环境变量必须是 JSON 字符串对象	Environment must be a JSON object of strings
+用户名	Username
+用户名 · 可选	Username · Optional
+用户证书路径 · 可选	User certificate path · Optional
+界面语言	Interface language
+监听地址	Bind address
+监听地址格式应为 127.0.0.1:8080	Use a bind address such as 127.0.0.1:8080
+目录跟踪	Track working directory
+目标格式应为 host:port	Use a target such as host:port
+直接连接	Direct connection
+直连	Direct
+石墨	Graphite
+确认服务器身份	Verify server identity
+私钥	Private key
+私钥口令 · 留空保留	Key passphrase · Leave blank to keep
+私钥路径	Private key path
+移除	Remove
+移除代理	Remove proxy
+移除提供方	Remove provider
+程序参数 · JSON 数组	Arguments · JSON array
+程序路径或名称	Executable path or name
+程序配置缺失	Missing process configuration
+端口	Port
+端口无效	Invalid port
+端口转发	Port forwarding
+终端	Terminal
+终端字体	Terminal font
+终端已关闭	Terminal closed
+终端已结束，AI 会话同步结束	Terminal and its AI conversation have ended
+终端执行	Run in terminal
+终端状态已变化，或无法确认空闲提示符，请手动执行	Terminal state changed or an idle prompt could not be verified. Execute manually.
+结束会话并退出	End sessions and quit
+继续	Continue
+继续工作	Keep working
+编辑	Edit
+编辑只支持 512 KiB 以内的文本文件	Editing is limited to text files up to 512 KiB
+编辑文件	Edit file
+编辑远程文件	Edit remote file
+编辑连接	Edit connection
+网络中断后自动重连	Reconnect after network interruption
+网络代理	Network proxies
+网络代理 · 直连时使用	Network proxy · For direct connections
+自动发送白名单只读命令	Automatically send allowlisted read-only commands
+草稿随会话保留 · 支持多行	Draft stays with this pane · Supports multiple lines
+表达式无效	Invalid expression
+视图	View
+设置	Settings
+设置…	Settings…
+设置表单不存在	Settings form is closed
+询问命令或排查问题。命令卡片可直接发送到此窗格，切换会话不会混入其他终端的内容。	Ask about commands or investigate a problem. Command cards run in this pane, and each terminal keeps its own conversation.
+询问命令，分析此终端的问题…	Ask about commands or investigate this terminal…
+请先连接 SSH 会话	Connect an SSH session first
+请先选择文件	Select a file first
+请确认上方工具调用	Review the tool calls above
+请选择模型	Select a model
+请选择私钥路径	Select a private key path
+请配置 AI 提供方	Configure an AI provider
+读取 Skill 资源	Read Skill resource
+读取目录…	Reading directory…
+跳板连接	Jump connection
+转到目录	Go to directory
+输出上下文已关闭，仅发送此窗格的对话内容。	Output context is off. Only this pane's conversation is sent.
+返回设置	Back to settings
+远程文件	Remote files
+远程目标	Remote target
+远程转发	Remote forwarding
+连接 SSH 后浏览远程文件	Connect SSH to browse remote files
+连接不能将自身作为跳板	A connection cannot use itself as a jump host
+连接中…	Connecting…
+连接导航	Connection sidebar
+连接已断开	Connection disconnected
+连接表单不存在	Connection form is closed
+连接设置	Connection settings
+退出	Quit
+退出 Nutty	Quit Nutty
+退出 Nutty…	Quit Nutty…
+退出 Nutty？	Quit Nutty?
+选择上传文件	Select files to upload
+通过可信来源核对指纹后再信任此服务器。	Verify the fingerprint through a trusted source before trusting this server.
+配置 AI 提供方	Configure AI provider
+配置已关闭	Configuration editor is closed
+配置目录：{}	Configuration directory: {}
+配置窗口已关闭	Configuration editor is closed
+配置网络代理	Configure network proxy
+重新连接	Reconnect
+重连次数无效	Invalid reconnect limit
+键盘快捷键	Keyboard shortcuts
+隐藏 Nutty	Hide Nutty
+隐藏其他应用	Hide other applications
+验证码	Verification code
+终端正在重连，请稍后输入	Terminal is reconnecting. Please wait before typing.
+请输入问题	Enter a question
+请先执行或拒绝待处理工具调用	Execute or reject pending tool calls first
+请等待当前任务结束	Wait for the current task to finish
+此终端的 AI 会话已结束	This terminal's AI conversation has ended
+工具尚未完成	Tools have not finished
+工具轮次已达上限，请输入新的问题	Tool round limit reached. Enter a new question.
+会话操作	Session actions
+正在保存配置	Saving configuration…
+启用 zsh 目录跟踪	Enable zsh directory tracking
+启用 bash 目录跟踪	Enable bash directory tracking
+启用 fish 目录跟踪	Enable fish directory tracking
+允许本地 Kitty 图像文件 · 仅此会话	Allow local Kitty image files · This session only
+复制	Copy
+粘贴	Paste
+全选	Select all
+剪切	Cut
+撤销	Undo
+重做	Redo
+此工具调用已处理	This tool call has already been handled
+工具调用不存在	Tool call does not exist
+工具调用已取消	Tool call was cancelled
+用户拒绝执行此工具	The user rejected this tool call
+请求已取消	Request cancelled
+AI 请求超时	AI request timed out
+AI 请求失败	AI request failed
+对话过长，请新建会话	Conversation too long. Start a new session.
+请等待当前回复，或先停止请求	Wait for the current reply or stop it first.
+对话过长，请清空后开始新对话	Conversation too long. Reset the session first.
+提供方已禁用	Provider is disabled
+模型不属于此提供方	Model does not belong to this provider
+此模型未启用所选推理强度	The selected reasoning effort is not enabled for this model
+提供方名称无效	Invalid provider name
+模型名称为空、重复或无效	Model names are empty, duplicated, or invalid
+至少配置一个模型，最多 128 个	Configure between 1 and 128 models
+终端响应队列已满	Terminal response queue is full
+SSH 通道已中断	SSH channel was interrupted
+SSH 连接已中断，可手动重连	SSH connection was interrupted. Reconnect manually.
+SSH 连接中断，正在重连 {}/{}	SSH connection interrupted. Reconnecting {}/{}
+SSH 重连失败：{}	SSH reconnection failed: {}
+终端读取失败：{}	Terminal read failed: {}
+终端写入失败：{}	Terminal write failed: {}
+已停止回复	Reply stopped
+导入与备份	Import & backup
+导入 OpenSSH 配置或 Nutty 加密备份，先预览后应用。默认合并并保留已有配置。	Preview an OpenSSH configuration or encrypted Nutty backup before applying. Merging preserves existing records.
+备份使用 Argon2id 和 AES-256-GCM。私钥文件、日志和命令历史不包含在备份中。	Backups use Argon2id and AES-256-GCM. Private key files, logs and command history are excluded.
+导出时包含已保存凭据	Include saved credentials in export
+导出加密备份…	Export encrypted backup…
+选择文件并预览…	Choose a file to preview…
+预览：{} 个连接，{} 个提供方，{} 个代理，{} 个集成，{} 个凭据	Preview: {} connections, {} providers, {} proxies, {} integrations, {} credentials
+替换全部配置 · 同名凭据也会被覆盖	Replace configuration · Matching credentials will also be replaced
+应用预览中的配置	Apply previewed configuration
+取消导入	Cancel import
+备份密码 · 至少 8 字节	Backup password · At least 8 bytes
+备份密码至少 8 字节，最多 4096 字节	Backup password must contain 8–4096 bytes
+选择 OpenSSH 配置或 Nutty 备份	Choose an OpenSSH configuration or Nutty backup
+加密备份已保存	Encrypted backup saved
+请输入备份密码	Enter the backup password
+不是受支持的 Nutty 备份文件	Unsupported Nutty backup file
+密码错误或备份文件已损坏	Incorrect password or corrupted backup
+备份内容超过 8 MiB	Backup exceeds 8 MiB
+备份加密失败	Backup encryption failed
+备份包含无效的凭据账户	Backup contains invalid credential accounts
+创建备份文件，目标必须不存在	Creating backup; destination must not exist
+导入文件过大	Import file is too large
+OpenSSH 配置超过 2 MiB	OpenSSH configuration exceeds 2 MiB
+OpenSSH 配置行缺少值	OpenSSH configuration line has no value
+OpenSSH 第 {} 行	OpenSSH line {}
+跳过 Match 块（第 {} 行）	Skipped Match block (line {})
+未导入 {}（第 {} 行）：多值或百分号展开暂不支持	Skipped {} (line {}): multiple values or percent expansions are unsupported
+未导入 {}（第 {} 行）；不会执行外部命令或读取 Include	Skipped {} (line {}); external commands and Include files are not evaluated
+{} 的 ProxyJump {} 未导入：请使用已定义的单个 Host 名称	{}: ProxyJump {} was skipped; use one declared Host alias
+未闭合的引号或转义	Unterminated quote or escape
+配置中没有可导入的明确 Host 名称，或超过 512 个	No literal Host aliases found, or more than 512 aliases
+收藏当前目录	Bookmark current directory
+删除书签	Delete bookmark
+文件书签无效、重复或连接不存在	Invalid or duplicate file bookmark, or missing connection
+最多保存 1024 个文件书签	Up to 1024 file bookmarks can be saved
+每个传输限速 · KiB/s，0 为不限速	Per-transfer limit · KiB/s, 0 means unlimited
+传输限速不能超过 1048576 KiB/s	Transfer limit must not exceed 1048576 KiB/s
+最多同时打开 64 个终端会话	Up to 64 terminal sessions can be open
+传输已取消	Transfer cancelled
+文件不是 UTF-8 文本	File is not UTF-8 text
+预览只支持 2 MiB 以内的文本文件	Preview supports text files up to 2 MiB
+远程目标文件已存在，请选择新的文件名	Remote file already exists. Choose a new name.
+目标文件已存在，请选择新的文件名	Destination already exists. Choose a new name.
+保存失败；部分凭据回滚失败	Save failed; some credentials could not be restored
+保存远程文件	Save remote file
+保存已取消	Save cancelled
+只支持编辑普通文件	Only regular files can be edited
+文件超过编辑大小限制	File exceeds the editing limit
+远程文件已更改，请重新打开后合并修改	Remote file changed. Reopen it and merge your edits.
+此服务器不支持原子替换，请另存文件后上传	Server does not support atomic replacement. Save as a new file and upload.
+命令历史	Command history
+命令历史文件过大	Command history file is too large
+暂无已保存命令	No saved commands
+请输入命令	Enter a command
+命令最多为 64 KiB	Commands must not exceed 64 KiB
+命令包含不可发送的控制字符	Command contains unsupported control characters
+输入内容超过 1 MiB	Input exceeds 1 MiB
+请先回到空的 Shell 提示符，再执行命令	Return to an empty shell prompt before executing commands
+请先退出全屏程序，再发送 Shell 命令	Exit the fullscreen application before sending shell commands
+终端状态已变化，请手动执行	Terminal state changed. Execute manually.
+终端上下文超过 32 KiB	Terminal context exceeds 32 KiB
+终端上下文过长	Terminal context is too long
+AI 协议回复过长	AI protocol response is too long
+AI 回复超过 256 KiB	AI response exceeds 256 KiB
+API 地址无效，请将密钥保存在独立字段	Invalid API URL. Store the key in its separate field.
+Agent ID 或名称重复	Duplicate Agent ID or name
+Agent stdin 不可用	Agent stdin unavailable
+Agent stdout 不可用	Agent stdout unavailable
+Agent 名称无效	Invalid Agent name
+ACP 上下文过长	ACP context is too long
+ACP 会话已结束	ACP session ended
+ACP 权限界面不可用	ACP permission UI unavailable
+ACP 请求已取消	ACP request cancelled
+ACP 请求结束	ACP request ended
+ACP 进程未就绪	ACP process is not ready
+启动 ACP Agent	Start ACP Agent
+会话已结束	Session ended
+MCP ID 或名称重复	Duplicate MCP ID or name
+MCP URL 无效	Invalid MCP URL
+MCP 代理不存在	MCP proxy does not exist
+MCP 会话已结束	MCP session ended
+MCP 分页游标重复	Duplicate MCP pagination cursor
+MCP 初始化超时	MCP initialization timed out
+MCP 名称无效	Invalid MCP name
+MCP 工具分页超过限制	MCP tool pagination exceeds limit
+MCP 工具参数定义过长	MCP tool schema is too long
+MCP 工具描述过长	MCP tool description is too long
+MCP 工具过多	Too many MCP tools
+每个会话最多启用 16 个 MCP 服务	Up to 16 MCP servers can be enabled per session
+可用工具总数超过 256	More than 256 tools are available
+工具参数不是有效 JSON 对象	Tool arguments are not a valid JSON object
+工具参数必须是对象	Tool arguments must be an object
+工具参数过长	Tool arguments are too long
+工具结果超过 128 KiB	Tool result exceeds 128 KiB
+工具调用超时	Tool call timed out
+工具调用过多或 ID 重复	Too many tool calls or duplicate IDs
+模型请求了未配置的工具	Model requested an unconfigured tool
+SKILL.md 缺少元数据	SKILL.md metadata is missing
+Skill 不存在	Skill does not exist
+Skill 名称无效或重复	Invalid or duplicate Skill name
+Skill 描述过长	Skill description is too long
+Skill 目录不能通过链接越界	Skill directory link escapes its root
+Skill 缺少名称	Skill name is missing
+Skill 资源超过 128 KiB	Skill resource exceeds 128 KiB
+Skills 数量超过 256	More than 256 Skills found
+Skills 目录最多 16 个	Up to 16 Skills directories are allowed
+Skills 目录须为唯一的绝对路径	Skills directories must be unique absolute paths
+请选择 Skill	Select a Skill
+请选择资源	Select a resource
+资源不能通过链接越界	Resource link escapes its root
+资源路径不能越界	Resource path escapes its root
+SOCKS 代理不支持认证方式	SOCKS proxy does not support this authentication method
+SOCKS 地址类型错误	Invalid SOCKS address type
+SOCKS 密码过长	SOCKS password is too long
+SOCKS 版本错误	Invalid SOCKS version
+SOCKS 目标无效	Invalid SOCKS destination
+SOCKS 认证失败	SOCKS authentication failed
+SOCKS 连接失败	SOCKS connection failed
+SSH 代理不存在	SSH proxy does not exist
+SSH 保活或重连设置无效	Invalid SSH keepalive or reconnect settings
+SSH 的 HTTPS 代理需配置 SOCKS5 或 HTTP CONNECT 端点	SSH proxy requires a SOCKS5 or HTTP CONNECT endpoint
+SSH 路由为空	SSH route is empty
+SSH 路由最多允许 16 跳	SSH routes support up to 16 hops
+SSH 身份认证失败	SSH authentication failed
+此平台的 SSH Agent 尚未接入，请使用密钥或密码	SSH Agent is unavailable on this platform. Use a key or password.
+主机地址无效	Invalid host address
+主机身份确认窗口已关闭	Host confirmation window closed
+交互式认证界面不可用	Interactive authentication UI unavailable
+代理 ID 重复	Duplicate proxy ID
+代理主机为空	Proxy host is empty
+代理名称无效	Invalid proxy name
+代理响应为空	Empty proxy response
+代理响应头过长	Proxy response headers are too long
+代理地址无效，凭据须单独保存	Invalid proxy URL. Store credentials separately.
+代理或目标连接超时	Proxy or destination connection timed out
+代理拒绝 CONNECT 请求	Proxy rejected CONNECT request
+代理用户名无效	Invalid proxy username
+恢复远程端口转发失败	Failed to restore remote forwarding
+此远程端口已在转发	Remote port is already forwarded
+远程监听端口必须大于零	Remote listening port must be greater than zero
+提供方 ID 或名称重复	Duplicate provider ID or name
+提供方引用的代理不存在	Provider proxy does not exist
+无法读取已知主机文件	Could not read known hosts
+无法读取私钥口令	Could not read private key passphrase
+无法连接 SSH Agent	Could not connect to SSH Agent
+服务器密钥与已保存的身份不一致	Server key differs from the saved identity
+服务器认证提示过多或过长	Too many or oversized authentication prompts
+服务器认证轮次超出限制	Authentication round limit exceeded
+服务器返回了空的文件块	Server returned an empty file block
+环境变量无效或过长	Invalid or oversized environment variable
+目标主机无效	Invalid destination host
+程序工作目录不存在	Process working directory does not exist
+程序工作目录须为绝对路径	Process working directory must be absolute
+程序或参数无效	Invalid program or arguments
+端口必须介于 1 和 65535 之间	Port must be between 1 and 65535
+认证回答数量不匹配	Authentication response count does not match
+认证已取消	Authentication cancelled
+认证窗口已关闭	Authentication window closed
+认证等待超时	Authentication wait timed out
+请输入用户名	Enter a username
+请输入连接名称	Enter a connection name
+跳板引用无效	Invalid jump host reference
+跳板连接不存在	Jump host does not exist
+跳板连接存在循环	Jump host cycle detected
+跳板连接存在循环或超过 16 跳	Jump host cycle detected or route exceeds 16 hops
+连接 ID 重复	Duplicate connection ID
+连接引用的代理不存在	Connection proxy does not exist
+字体或滚动历史设置无效	Invalid font or scrollback settings
+配置文件超过 2 MiB	Configuration file exceeds 2 MiB
+配置版本高于当前应用支持范围	Configuration version is newer than supported
+配置项目过多	Too many configuration records
+集成配置项目过多	Too many integration records
+AI 助手	AI assistant
+AI 会话选项	AI session options
+分屏	Split pane
+选择终端以查看命令历史	Select a terminal to view command history
+仅此窗格 · 点击填入命令发送器	This pane only · Click to fill the command composer
+此会话尚无命令	No commands in this session yet
+Enter 换行	Enter for a new line
+自动	Auto
+关闭推理	Off
+极低	Minimal
+低	Low
+中等	Medium
+高	High
+极高	XHigh
+最高	Max
+由 Agent 管理	Managed by Agent
+请选择提供方	Select a provider
+搜索模型…	Search models…
+请选择字体	Select a font
+搜索系统字体…	Search installed fonts…
+界面字体	Interface fonts
+界面英文字体	Interface Latin font
+界面中文字体	Interface Chinese font
+终端英文字体	Terminal Latin font
+终端中文字体	Terminal Chinese font
+界面文字、菜单和按钮	Interface text, menus and buttons
+终端正文、命令发送器和 AI 输入框	Terminal, command composer and AI input
+中文字体预览	Chinese font preview
+界面字号必须介于 10 和 24 之间	Interface font size must be between 10 and 24
+搜索…	Search…
+工具与扩展	Tools & extensions
+请选择本地 Shell	Select a local shell
+搜索本地 Shell…	Search local shells…
+外观与字体	Appearance & Fonts
+语言、启动环境与文件传输	Language, startup environment, and file transfers
+语言	Language
+设置应用界面的显示语言	Choose the application display language
+启动与目录	Startup & Directory
+应用于新建的本地终端会话	Applies to new local terminal sessions
+在会话标题和文件浏览器中显示当前工作目录	Show the working directory in the session title and file browser
+每个传输任务独立限速	Apply a separate limit to each transfer
+传输限速（KiB/s，0 为不限速）	Transfer limit (KiB/s, 0 = unlimited)
+选择主题，并分别设置界面与终端的中英文字体	Choose a theme and separate interface and terminal fonts
+搜索选择主题，预览实时更新	Search for a theme and preview it instantly
+搜索主题…	Search themes…
+排版、光标与输入行为；保存后应用于所有窗格	Typography, cursor, and input behavior; save to apply to all panes
+排版与留白	Typography & Spacing
+字符在整行中垂直居中，中文保持双列对齐	Vertically centered characters with aligned double-width Chinese text
+行高（字体倍数，1–2.5）	Line height (font multiplier, 1–2.5)
+字间距（px，0–8）	Letter spacing (px, 0–8)
+水平内边距（px，0–80）	Horizontal padding (px, 0–80)
+垂直内边距（px，0–80）	Vertical padding (px, 0–80)
+光标	Cursor
+设置终端的默认光标样式	Set the default terminal cursor style
+光标形状	Cursor shape
+方块	Block
+竖线	Beam
+光标线宽（px，1–5）	Cursor thickness (px, 1–5)
+闪烁间隔（ms，200–2000）	Blink interval (ms, 200–2000)
+光标闪烁	Blink cursor
+终端程序可以临时调整光标样式	Terminal applications can temporarily change the cursor style
+未聚焦时显示空心光标	Show hollow cursor when unfocused
+切换窗格后仍可辨认输入位置	Keep the input position visible when switching panes
+输入与滚动	Input & Scrolling
+调整选区、键盘和滚轮行为	Customize selection, keyboard, and scrolling behavior
+滚动速度（倍数，0.5–5）	Scroll speed (multiplier, 0.5–5)
+选中后自动复制	Copy on selection
+将终端中选中的文字复制到剪贴板	Copy selected terminal text to the clipboard
+Option 作为 Alt 键	Use Option as Alt
+关闭后使用系统的 Option 字符输入	Disable to use native Option character input
+历史与记录	History & Recording
+会话内历史始终可用，文件记录按需开启	Session history is always available; enable file recording when needed
+将 Shell 命令记录到本地文件	Record Shell commands to local files
+将终端输出记录到本地文件	Record terminal output to local files
+搜索模型或提供方…	Search models or providers…
+没有匹配的模型	No matching models
+选择模型	Choose a model
+选择模型与推理强度	Choose model and reasoning effort
+终端排版或光标设置超出范围	Terminal typography or cursor settings are out of range
+主题	Theme
+下划线	Underline
+文件传输	File Transfers
+尚未配置 MCP 服务	No MCP servers configured
+尚未配置 Agent	No agents configured
+设置 Skills 目录	Set Skills directories
+MCP 服务	MCP Servers
+为 AI 会话连接外部工具	Connect external tools to AI sessions
+使用独立的 Agent 程序处理终端任务	Use standalone agents for terminal tasks
+从指定目录加载技能说明	Load skill instructions from selected directories
+凭据随备份一起加密	Credentials are encrypted with the backup
+备份密码	Backup password
+加密备份	Encrypted Backup
+导入或导出加密备份时使用此密码	Use this password to import or export an encrypted backup
+提供商	Provider
+搜索或输入模型 ID…	Search or enter a model ID…
+获取模型	Fetch models
+测试连接	Test connection
+手动添加	Add manually
+移除模型	Remove model
+填写密钥后获取模型，也可以手动添加	Enter an API key to fetch models, or add them manually
+展开模型可多选推理强度；自动始终可用。测试连接仅查询模型列表。	Expand a model to select effort levels. Auto is always available. Connection tests only query the model list.
+已获取 {} 个模型	Fetched {} models
+连接成功，可读取 {} 个模型	Connected successfully; {} models available
+模型名称无效或列表已满	Invalid model ID or model list is full
+本地 Agent	Local Agents
+重新识别	Scan again
+识别中…	Scanning…
+官方 ACP 适配器 · 首次启动会自动下载	Official ACP adapter · Downloaded on first launch
+ACP 启动配置已识别	ACP launch configuration detected
+已安装 · 请升级 CLI 以启用 ACP	Installed · Upgrade the CLI to enable ACP
+已安装 · 需安装 Node.js 或 ACP 适配器	Installed · Install Node.js or an ACP adapter
+版本未知	Unknown version
+接入	Connect
+已接入	Configured
+未识别到本地 Agent，仍可手动添加 ACP 程序	No local Agents detected. You can still add an ACP program manually.
+请先填写 API 密钥	Enter an API key first
+连接失败，请检查 API 地址、代理和网络	Connection failed. Check the API endpoint, proxy and network.
+认证失败，请检查 API 密钥和访问权限	Authentication failed. Check the API key and access permissions.
+此地址不支持模型列表，请检查 API 地址或手动添加模型	This endpoint does not support model listing. Check the API URL or add models manually.
+请求过于频繁，请稍后重试	Too many requests. Try again later.
+模型接口返回 HTTP {}	The model endpoint returned HTTP {}
+模型列表过大	The model list is too large
+读取模型列表失败	Failed to read the model list
+模型接口未返回有效 JSON	The model endpoint returned invalid JSON
+模型超过 512 个，请手动选择添加	More than 512 models are available. Add the models you need manually.
+没有可用于对话的模型，请手动添加模型	No chat models found. Add a model manually.
+模型列表分页无效	Invalid model list pagination
+模型列表分页过多，请手动添加模型	Too many model list pages. Add a model manually.
+模型列表请求超时	Model list request timed out
+模型列表格式无效	Invalid model list format
+模型名称缺失	Model ID is missing
+模型名称无效	Invalid model ID
+模型超过 512 个，请先移除不需要的模型	Model limit reached (512). Remove models you do not need first.
+至少配置一个模型，最多 512 个	Configure between 1 and 512 models
+请求正在进行	A request is in progress
+准备登录命令	Prepare login command
+重试连接	Retry connection
+请按 Agent 的说明在本地终端登录，再重试连接	Follow the Agent's instructions to sign in in a local terminal, then retry.
+登录命令已填入命令发送器，执行并完成登录后返回 Agent 重试	The login command is ready in the command sender. Run it, complete sign-in, then return to Agent and retry.
+Agent 需要登录。请先在本地终端完成登录，再重试连接。	This Agent requires sign-in. Sign in in a local terminal, then retry.
+ACP 初始化失败	ACP initialization failed
+ACP 初始化失败：{}	ACP initialization failed: {}
+ACP 请求失败：{}	ACP request failed: {}
+ACP Agent 进程已退出，请检查程序路径、参数和运行环境	The ACP Agent exited. Check the executable, arguments, and runtime environment.
+Codex 缺少平台可执行包，请安装本机 Codex 或配置 CODEX_PATH	Codex's platform executable is missing. Install the local Codex CLI or configure CODEX_PATH.
+Agent 返回错误（{}），请检查登录、配置和网络	Agent returned error ({}). Check sign-in, configuration, and network.
+Agent 启动超时，首次使用适配器需要下载，请检查 Node.js、软件源和网络	Agent startup timed out. The first adapter launch downloads packages. Check Node.js, the package registry, and network.
+Agent 的 ACP 协议版本不兼容，请升级 Agent	This Agent's ACP protocol version is incompatible. Update the Agent.
+Agent 认证超时，请检查登录状态和网络后重试	Agent authentication timed out. Check sign-in and network, then retry.
+Agent 创建会话超时，请检查登录状态和工作目录后重试	Agent session creation timed out. Check sign-in and the working directory, then retry.
+ACP Agent 进程未就绪，请检查程序路径、Node.js 和运行环境	The ACP Agent did not become ready. Check the executable, Node.js, and runtime environment.
+ACP 请求超时	ACP request timed out
+复制代码	Copy code
+SSH 算法	SSH algorithms
+为终端、SFTP 和端口转发配置 SSH 连接	Configure SSH for terminals, SFTP and port forwarding
+主机地址	Host address
+交互式认证	Interactive authentication
+取消测试	Cancel test
+恢复默认	Restore defaults
+提高优先级	Move up
+降低优先级	Move down
+搜索跳板连接…	Search jump connections…
+本机 → {} 台跳板机 → 目标主机	Local → {} jump hosts → target
+本机 → 目标主机	Local → target
+添加跳板机	Add jump host
+目标主机和每台跳板机使用各自的认证信息	Each host uses its own authentication settings
+系统默认 · 从上到下优先协商	Defaults · Preferred from top to bottom
+自定义 · 从上到下优先协商	Custom · Preferred from top to bottom
+编辑跳板机	Edit jump host
+网络代理 · 第一跳使用	Network proxy · First hop
+跳板机	Jump host
+身份认证	Authentication
+连接时按服务器提示输入密码或动态验证码	Enter the password or verification code when the server requests it
+连接稳定性	Connection stability
+连接超时无效	Invalid connection timeout
+连接超时（秒，1–300）	Connection timeout (seconds, 1–300)
+连接路径	Connection route
+选择已有连接，或为这条路径添加独立的跳板机	Choose a saved connection or add a jump host to this route
+通过跳板连接时，网络代理使用第一台跳板机的配置	Jump routes use the first jump host's network proxy
+配置完成后返回原连接，草稿会保留	Return to the original connection after saving; its draft is preserved
+配置握手超时、保活和断线恢复	Configure handshake timeout, keepalive and reconnection
+默认使用现代算法；按类别选择并调整协商顺序	Use modern defaults or customize algorithms and negotiation order
+已发送	Sent
+执行	Run
+未通过只读校验，请点击执行	Read-only check failed; click to run
+需确认	Review
+SSH 身份认证超时	SSH authentication timed out
+SSH 连接超时	SSH connection timed out
+连接 {}@{}:{}	Connecting to {}@{}:{}
+连接测试已取消	Connection test cancelled
+SSH KEX 不可用	SSH KEX algorithm unavailable
+SSH MAC 不可用	SSH MAC algorithm unavailable
+SSH 加密算法不可用	SSH cipher unavailable
+SSH 压缩算法不可用	SSH compression unavailable
+SSH 算法配置无效	Invalid SSH algorithm configuration
+主机密钥	Host key
+加密算法	Ciphers
+压缩	Compression
+完整性校验（MAC）	Integrity (MAC)
+密钥交换（KEX）	Key exchange (KEX)
+AI 回复、代码和输入框 · 独立于终端	AI replies, code and input · Independent from terminal fonts
+Agent 中文字体	Agent Chinese font
+Agent 字体	Agent fonts
+Agent 英文字体	Agent Latin font
+终端正文和命令发送器	Terminal text and command sender
+Agent 字号必须介于 10 和 24 之间	Agent font size must be between 10 and 24
+{} 会话   ·   UTF-8	{} sessions   ·   UTF-8
+整条 SSH 路径连接与认证成功	Connected and authenticated along the full SSH route
+请先退出全屏程序，再清屏	Exit the full-screen application before clearing
+跳板机设置	Jump host settings
+SSH 超时、保活或重连设置无效	Invalid SSH timeout, keepalive or reconnect settings
+正在读取 Agent 模型…	Loading Agent models…
+Agent 未公开设置，使用 CLI 当前配置	Agent has not exposed settings; using the current CLI configuration
+模型与设置来自当前 Agent	Models and settings are supplied by the current Agent
+刷新 Agent 模型	Refresh Agent models
+只读自动发送：开	Read-only auto-send: On
+只读自动发送：关	Read-only auto-send: Off
+终端上下文：开	Terminal context: On
+终端上下文：关	Terminal context: Off
+思考模式	Thinking
+上下文窗口	Context window
+模式	Mode
+开启	On
+Agent 不支持此配置值，请刷新模型列表	Agent does not support this setting value. Refresh the model list.
+Agent 配置切换已取消	Agent setting change cancelled
+Agent 配置切换失败	Failed to change Agent settings
+Agent 配置切换超时	Agent setting change timed out
+Agent 配置已变化，请刷新列表	Agent settings have changed. Refresh the list.
+Agent 会话已结束，请刷新模型列表	Agent session has ended. Refresh the model list.
+Agent 返回了无效会话	Agent returned an invalid session
+当前 Agent 模型额度或速率受限，请在模型菜单中切换可用模型后重试	The current Agent model has reached its quota or rate limit. Choose an available model in the model menu and retry.
+ACP 请求失败	ACP request failed
+清屏	Clear screen
+ACP 请求失败: 当前 Agent 模型额度或速率受限，请在模型菜单中切换可用模型后重试	The current Agent model has reached its quota or rate limit. Choose an available model in the model menu and retry.
+重新发送	Resend
+重新发送到当前终端	Resend to this terminal
+测试可用性	Test availability
+测试中…	Testing…
+测试失败	Test failed
+认证与会话创建通过 · {} 个模型	Authentication and session creation passed · {} models
+从文件系统导入 Skills	Import Skills from files
+高级：手动配置路径	Advanced: enter paths
+选择 SKILL.md、技能文件夹或技能目录	Select SKILL.md, a skill folder or a collection
+请选择 SKILL.md 或技能目录	Select SKILL.md or a skill directory
+所选目录未发现有效 Skill	No valid skills found in this directory
+Skill 文件缺少目录	The skill file has no parent directory
+连接	Connections
+SSH 终端	SSH terminal
+独立 SFTP	Independent SFTP
+初始远程目录	Initial remote directory
+初始目录无效	Invalid initial directory
+跟随当前终端	Follow active terminal
+跟随终端	Follow terminal
+正在连接 SFTP…	Connecting SFTP…
+SFTP 连接已取消	SFTP connection cancelled
+SFTP 初始化超时	SFTP initialization timed out
+读取目录超时	Directory listing timed out
+文件操作超时	File operation timed out
+远程目录超过 100000 项，请选择子目录	Directory exceeds 100,000 entries; select a subdirectory
+目录名称数据超过 32 MiB 限制	Directory names exceed the 32 MiB limit
+连接管理器已结束	Connection registry has closed
+新建文件夹	New folder
+文件操作	File actions
+权限	Permissions
+重命名	Rename
+删除	Delete
+删除文件	Delete file
+删除空目录	Delete empty directory
+删除后无法恢复，请确认目标。目录仅允许删除空目录。	Deletion cannot be undone. Confirm the target; only empty directories can be deleted.
+请输入有效的八进制权限，例如 644 或 755	Enter octal permissions, such as 644 or 755
+请输入有效的文件名	Enter a valid file name
+文件名无效	Invalid file name
+文件权限无效	Invalid file permissions
+目标文件已存在	Destination already exists
+确认	Confirm
+选择 Zmodem 发送文件	Choose files to send with Zmodem
+选择 Zmodem 接收目录	Choose a Zmodem receive directory
+选择文件…	Choose files…
+Zmodem 传输中，请等待完成或取消后再输入	Zmodem transfer in progress; finish or cancel before typing
+Zmodem 接收队列已满或传输已结束	Zmodem receive queue is full or the transfer has ended
+Zmodem 等待选择文件超出缓存限制	Zmodem exceeded its buffer while waiting for file selection
+Zmodem 每次最多发送 128 个文件	Zmodem can send up to 128 files per transfer
+Zmodem 每次最多接收 128 个文件	Zmodem can receive up to 128 files per transfer
+Zmodem 请求已结束	Zmodem request has ended
+Zmodem 文件名不是 UTF-8	Zmodem file name is not UTF-8
+Zmodem 文件名无效	Invalid Zmodem file name
+接收文件已存在，请选择其他目录	Receive destination already exists; choose another directory
+文件超过 Zmodem 大小限制	File exceeds the Zmodem size limit
+Zmodem 仅支持不超过 4 GiB 的普通文件	Zmodem supports regular files smaller than 4 GiB
+请选择文件或目录	Choose files or a directory
+请选择接收目录	Choose a receive directory
+发送文件未打开	Send file is not open
+发送期间文件被截断	Source file was truncated during transfer
+接收文件未打开	Receive file is not open
+接收数据超过文件大小限制	Received data exceeds the file size limit
+Zmodem 文件大小不完整	Zmodem received an incomplete file
+无法保存接收文件，目标可能已存在	Cannot publish received file; destination may exist
+Zmodem 结束帧超过限制	Zmodem final frame exceeds the limit
+远端取消了 Zmodem 传输	The remote side cancelled the Zmodem transfer
+Zmodem 协议无法继续解析	Zmodem protocol cannot continue parsing
+不支持的 Zmodem 协议事件	Unsupported Zmodem protocol event
+关闭文件连接	Close file connection
+取消中…	Cancelling…
+AI 消息	AI message
+展开输入框	Expand input
+收起输入框	Collapse input
+配置已保存	Configuration saved
+浏览…	Browse…
+选择文件	Choose a file
+选择文件夹	Choose a folder
+请选择可执行的 Shell 程序	Choose an executable shell program
+复制到输入框	Copy to input
+未保存凭据，请在对应配置中填写密钥或密码	No saved credential. Enter a key or password in its settings.
+系统钥匙串访问失败；已暂停重复授权，请解锁后重试，或重新配置凭据	System keychain access failed. Repeated authorization is paused; unlock it and retry, or configure credentials again.
+无法读取提供方 {} 的 API 密钥	Could not read the API key for provider {}
+本次使用密钥	Use key for this run
+仅使用已保存的提供方设置；密钥不写入磁盘，退出时清除	Uses the saved provider settings. The key stays in memory and is cleared on exit.
+请先保存提供方设置	Save the provider settings first
+请先保存更改的提供方地址和协议	Save the changed provider endpoint and protocol first
+密钥已用于本次运行，退出时清除；请返回 AI 助手重试	Key is ready for this run and will be cleared on exit. Return to the assistant and retry.
+配置提供方密钥	Configure provider key
+重试钥匙串	Retry keychain
+解锁系统钥匙串后，重新授权并重试刚才的问题	After unlocking the system keychain, authorize access again and retry the previous question.
+凭据为空或过长	Credential is empty or too long
+临时密钥数量达到上限，请重启应用后再配置	Temporary key limit reached. Restart the app before configuring more keys.
+用户证书	User certificate
+密钥	Key
+连接及其保存的凭据已删除	Connection and saved credentials deleted
+连接操作	Connection actions
+删除连接	Delete connection
+删除中…	Deleting…
+连接不存在	Connection does not exist
+此连接被以下跳板路径引用，请先修改这些连接：	This connection is used by these jump routes. Update them first:
+删除保存的连接及其凭据，不关闭已打开的会话，也不删除私钥文件	Delete the saved connection and credentials. Open sessions and private key files are retained.
+使用本机 Agent 中已加载的密钥；无需在此填写私钥或密码	Use keys loaded in the local Agent; no private key or password is needed here.
+Agent 套接字 · 留空自动识别	Agent socket · Leave empty to detect automatically
+SSH Agent 已连接，但没有密钥。请先使用 ssh-add 加载密钥	SSH Agent connected with no keys. Load a key using ssh-add first.
+搜索 Agent 密钥…	Search Agent keys…
+选择认证方式不会立即登录。点击测试连接可验证服务器是否支持交互式认证	Choosing authentication does not log in. Test the connection to verify interactive authentication.
+尚未配置代理。添加 HTTP CONNECT 或 SOCKS5 代理后即可选择	No proxies configured. Add an HTTP CONNECT or SOCKS5 proxy to select it here.
+编辑所选代理	Edit selected proxy
+仅 AI / MCP	AI / MCP only
+已配置代理 · 当前不可用	Configured proxy · Currently unavailable
+自动选择 Agent 密钥	Select Agent key automatically
+已配置密钥 · 当前未加载	Configured key · Not currently loaded
+代理类型	Proxy type
+代理主机	Proxy host
+代理主机无效	Invalid proxy host
+代理端口无效	Invalid proxy port
+SSH 支持 HTTP CONNECT / SOCKS5；HTTPS 代理用于 AI 与 MCP	SSH supports HTTP CONNECT / SOCKS5; HTTPS proxies are for AI and MCP.
+返回连接设置	Back to connection settings
+SOCKS5 · 远程 DNS	SOCKS5 · Remote DNS
+HTTPS · AI / MCP	HTTPS · AI / MCP
+检测 SSH Agent…	Detecting SSH Agent…
+重新检测 SSH Agent	Detect SSH Agent again
+SSH Agent 可用，已加载 {} 个密钥	SSH Agent available with {} loaded keys
+未发现 SSH Agent，请启动 Agent 并加载密钥，或选择 Agent 套接字	No SSH Agent found. Start an Agent and load keys, or choose its socket.
+无法连接 SSH Agent，请检查 Agent 是否运行及套接字路径	Cannot connect to SSH Agent. Check that it is running and verify the socket path.
+SSH Agent 连接超时	SSH Agent connection timed out
+SSH Agent 获取密钥超时	SSH Agent identity request timed out
+SSH Agent 无法列出密钥，请检查是否已解锁	SSH Agent cannot list keys. Check that it is unlocked.
+SSH Agent 密钥数量超过 128，请选择专用 Agent	SSH Agent has more than 128 identities. Choose a dedicated Agent.
+SSH Agent 中没有密钥，请先加载密钥	SSH Agent has no keys. Load a key first.
+SSH Agent 签名失败，请解锁 Agent 或允许此次签名	SSH Agent signing failed. Unlock the Agent or allow this signature.
+配置的 SSH Agent 密钥未加载，请重新检测或选择其他密钥	The selected SSH Agent key is not loaded. Detect keys again or choose another key.
+服务器拒绝 SSH Agent 密钥，请确认用户名及服务器授权密钥	Server rejected the SSH Agent key. Verify the username and server authorized keys.
+SSH Agent 套接字路径无效	Invalid SSH Agent socket path
+SSH Agent 密钥指纹无效	Invalid SSH Agent key fingerprint
+凭据变更包含重复账户	Credential changes contain duplicate accounts
+服务器不支持交互式认证，请选择服务器支持的认证方式	Server does not support interactive authentication. Choose a supported authentication method.
+服务器拒绝交互式认证，请检查密码或验证码	Server rejected interactive authentication. Check the password or verification code.
+未分组	Ungrouped
+还没有保存的连接	No saved connections yet
+没有匹配的连接	No matching connections
+SFTP 未返回唯一的绝对路径	The SFTP server did not return one absolute path
+SFTP 目录分页超过内存限制	The SFTP directory page exceeds the memory limit
+SFTP 绝对路径无效	Invalid absolute SFTP path
+SFTP 连续返回空目录页	The SFTP server repeatedly returned empty directory pages
+上次传输被中断，可校验后继续	The previous transfer was interrupted; resume to verify and continue
+不支持传输设备、管道或未知文件类型	Device files, pipes, and unknown file types cannot be transferred
+不支持此传输记录版本	Unsupported transfer record version
+从头重传	Restart transfer
+任务目录身份不匹配	The task directory identity does not match
+传输大小溢出	The transfer size exceeds the supported range
+传输失败	Transfer failed
+传输存储目录不能是符号链接	The transfer storage directory cannot be a symbolic link
+传输存储目录项过多，请检查存储目录	Too many transfer records; check the storage directory
+传输工作线程异常：{}	Transfer worker failed: {}
+传输期间源文件变化，未发布目标	The source changed during transfer; the destination was not published
+传输清单不完整	The transfer manifest is incomplete
+传输清单行无效或过长	Invalid or oversized transfer manifest entry
+传输记录无效	Invalid transfer record
+传输记录状态无效	Invalid transfer record state
+传输记录超过限制	The transfer record exceeds the size limit
+传输记录路径无效	Invalid path in the transfer record
+传输记录过大	The transfer record is too large
+传输路径无效	Invalid transfer path
+传输队列	Transfer queue
+传输队列不可用：{}	Transfer queue unavailable: {}
+传输队列忙，请稍后重试	The transfer queue is busy; try again shortly
+传输队列最多 128 个任务，请移除已完成记录	The queue supports 128 tasks; remove completed records to add more
+分片不是普通文件	The partial download is not a regular file
+分片丢失	The partial file is missing
+分片大小与源文件不匹配	The partial file size does not match the source
+原子保存未成功：{}	Atomic save failed: {}
+发布结果类型不匹配	The published file type does not match
+取消并清理分片	Cancel and remove partial files
+同一目标已有传输任务	A transfer to this destination already exists
+将此 SFTP 绑定到当前目标	Bind this SFTP connection to the current target
+已取消	Canceled
+已暂停	Paused
+当前目标目录尚未识别	The current target directory has not been detected
+恢复任务超过上限，未加载剩余任务	The recovery limit was reached; remaining tasks were not loaded
+扫描目录	Scanning directories
+排队中	Queued
+文件不存在或不是普通文件	The file is missing or is not a regular file
+文件名不是 UTF-8	The filename is not valid UTF-8
+文件名称无效或无法跨平台安全传输	The filename is invalid or cannot be safely transferred across platforms
+文件名称无法在 Windows 上安全保存	The filename cannot be safely saved on Windows
+文件大小不匹配	The file sizes do not match
+文件属性校验失败，原文件未替换	File metadata verification failed; the original file was not replaced
+无效的 SFTP 数据块	Invalid SFTP data block
+无效链接目标	Invalid symbolic link target
+无法保存传输状态：{}	Could not save transfer state: {}
+无法保留文件所有者或组，原文件未替换	Could not preserve file ownership; the original file was not replaced
+无法保留文件权限，原文件未替换	Could not preserve file permissions; the original file was not replaced
+无法恢复传输记录：{}	Could not restore transfer record: {}
+无法确认发布结果，目标不存在	Could not confirm publication; the destination is missing
+暂停	Pause
+暂存目录不属于此传输，拒绝继续	The staging directory does not belong to this transfer
+暂存目录层级超限	The staging directory exceeds the nesting limit
+暂存目录被替换	The staging directory was replaced
+暂存目录身份不完整且包含数据，拒绝清理	The staging identity is incomplete and contains data; cleanup was refused
+暂存路径不是目录	The staging path is not a directory
+暂存链接不匹配	The staged symbolic link does not match
+校验续传内容	Verifying partial content
+正在发布	Publishing
+正在暂停	Pausing
+正在验证目标目录…	Verifying target directory…
+此平台尚不支持原子不覆盖目录发布	Atomic publication without replacement is unsupported on this platform
+此平台尚不支持恢复符号链接	Restoring symbolic links is unsupported on this platform
+清理分片	Removing partial files
+源文件不存在	The source file does not exist
+源文件已变化，不能继续旧传输	The source changed; restart the transfer
+源文件已被删除	The source file was deleted
+源文件或分片已变化，拒绝拼接不同内容	The source or partial file changed; mismatched content will not be combined
+源文件或分片意外结束	The source or partial file ended unexpectedly
+源目录包含传输记录目录，请选择其子目录	The source contains transfer records; select a child directory instead
+源链接已变化	The source symbolic link changed
+目录不存在或是符号链接	The directory is missing or is a symbolic link
+目录层级超过 64 层	Directory nesting exceeds 64 levels
+目录清单超过 100000 项或 64 MiB，请分批传输	The manifest exceeds 100000 entries or 64 MiB; transfer in smaller batches
+目标不能位于源目录内	The destination cannot be inside the source directory
+目标已存在，传输不会覆盖文件	The destination exists; transfers do not overwrite files
+目标已存在，请选择新的文件或目录名称	The destination exists; choose another file or directory name
+相对路径无效	Invalid relative path
+移除记录	Remove record
+等待重试	Waiting to retry
+终端目标	Terminal target
+继续或重试	Resume or retry
+缺少任务目录	Missing task directory
+缺少文件名称	Missing filename
+缺少父目录	Missing parent directory
+缺少路径	Missing path
+缺少链接目标	Missing symbolic link target
+请选择目标主机的 SFTP 连接并绑定，避免操作网关文件	Select and bind the target host's SFTP connection to avoid accessing gateway files
+路径不是 UTF-8	The path is not valid UTF-8
+路径包含空字符	The path contains a NUL character
+路径数据过长	The path data is too long
+连接或跳板配置已变化，请新建传输，旧任务不会连接其他主机	The connection or jump route changed; create a new transfer to avoid contacting another host
+链接发布结果不匹配	The published symbolic link does not match
+链接目标不是 UTF-8	The symbolic link target is not valid UTF-8
+链接目标丢失	The symbolic link target is missing
+链接目标无效	Invalid symbolic link target
+服务器未报告文件大小，拒绝传输	The server did not report the file size; transfer was refused
+等待远端 Shell 集成：请在终端按 Enter 返回空提示符	Waiting for remote shell integration: press Enter in the terminal to return to an empty prompt
+只读自动发送：等待 Shell	Read-only auto-send: waiting for shell
+包含未支持的展开或脚本结构，请手动执行	Unsupported expansion or script syntax; run manually
+{} 可能等待终端输入，请指定文件或管道	{} may wait for terminal input; specify a file or pipe
+{} 的命令或参数尚未通过自动只读校验	{} or its arguments have not passed the automatic read-only check
+命令语言与当前终端 Shell 不匹配，已阻止发送	Command language does not match the current terminal shell; sending blocked
+当前 Shell 暂不支持只读自动发送	Read-only auto-send is not supported by the current shell
+当前 Shell 不支持 $0，请手动调整命令	The current shell does not support $0; adjust the command manually
+每次最多自动发送 3 条命令，其余请手动执行	Auto-send is limited to 3 commands per reply; run the rest manually
+恢复工作区	Restore workspace
+启动时恢复标签、分屏和本地目录；SSH 会话手动重连	Restore tabs, splits and local directories on launch; reconnect SSH manually
+上次的本地目录已不存在，已使用启动目录	The previous local directory no longer exists; using the startup directory
+连接已移除	Connection removed
+工作区记录损坏，已恢复上一份布局	Workspace checkpoint was damaged; restored the previous layout
+工作区无法恢复，原记录已保留	Unable to restore the workspace; original records have been retained
+工作区保存失败：{}	Could not save the workspace: {}
+不支持此工作区版本	Unsupported workspace version
+工作区超过 64 个窗格	Workspace exceeds the 64-pane limit
+工作区记录过大	Workspace checkpoint is too large
+处理同名冲突	Resolve name conflict
+保留两份	Keep both
+跳过此项	Skip this item
+替换现有文件	Replace existing file
+已跳过	Skipped
+目标已存在，请选择保留两份、跳过或替换文件	Destination exists; choose Keep both, Skip or Replace file
+目标在确认后已变化，请重新选择冲突操作	Destination changed after confirmation; choose a conflict action again
+目标在传输期间已变化，原文件未替换	Destination changed during transfer; original file was preserved
+目标在传输期间已创建，请选择冲突操作	Destination was created during transfer; choose a conflict action
+目录和链接不能替换普通文件，请选择保留两份	Directories and links cannot replace regular files; choose Keep both
+同名副本过多，请选择新的名称	Too many copies share this name; choose another name
+服务器不支持原子替换或拒绝操作，原文件保留，请选择保留两份	Server does not support or rejected atomic replacement; original preserved, choose Keep both
+文件发布超时，可重试核对结果	Publishing timed out; retry to reconcile the outcome
+目标在校验期间被截断	Destination was truncated during verification
+目标在校验期间已变化	Destination changed during verification
+只能替换普通文件	Only regular files can be replaced
+无法保留目标文件所有者和组	Could not preserve destination owner and group
+目标文件属性无法保留	Could not preserve destination attributes
+创建并保存规则，可独立启停	Create and save rules, then start or stop them independently
+启动转发	Start forwarding
+删除规则	Delete rule
+SSH 连接成功后自动启动	Start when the SSH connection succeeds
+此转发规则已保存	This forwarding rule is already saved
+此监听地址已有活动转发，请先停止它	An active forward uses this listen address; stop it first
+最多保存 128 条转发规则	Up to 128 forwarding rules can be saved
+转发规则引用的 SSH 连接不存在	The forwarding rule references an unavailable SSH connection
+保存的转发规则必须指定固定端口	Saved forwarding rules require a fixed listen port
+转发目标无效	Invalid forwarding destination
+转发模式与目标不匹配	Forwarding mode and destination do not match
+远程转发建立超时	Remote forwarding startup timed out

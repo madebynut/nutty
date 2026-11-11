@@ -1,0 +1,129 @@
+[workspace]
+members = [".", "crates/nutty-core", "crates/nutty-terminal", "crates/nutty-ssh", "crates/nutty-ai"]
+default-members = ["."]
+resolver = "3"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+alacritty_terminal = "0.26.0"
+anyhow = "1.0.104"
+aes-gcm = "0.11.1"
+argon2 = "0.6.0"
+async-channel = "2.5.0"
+dirs = "7.0.0"
+futures-util = "0.3.34"
+gpui-kit = "0.9.1"
+getrandom = "0.4.3"
+keyring = "4.2.0"
+portable-pty = "0.9.0"
+rig-core = { version = "0.46.0", features = ["reqwest"] }
+rig-reqwest = "0.46.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "socks", "stream"] }
+url = "2.5.8"
+base64 = "0.23.1"
+cursor-icon = "1.2.0"
+memchr = "2.8.3"
+nix = { version = "0.31.3", features = ["signal", "process", "feature"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+flate2 = "1.1.11"
+rmcp = { version = "3.9.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+agent-client-protocol = { version = "5.0.0", features = ["process"] }
+russh = "0.65.1"
+russh-sftp = "3.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "io-util", "net", "fs", "macros", "process"] }
+tokio-util = { version = "0.7.20", features = ["rt", "compat", "codec"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.29.2", features = ["v4", "serde"] }
+zeroize = "1.9.1"
+
+zmodem2 = "0.7.3"
+
+rand = "0.10.3"
+tempfile = "3.27.0"
+nutty-core = { path = "crates/nutty-core", version = "1.0.0" }
+nutty-terminal = { path = "crates/nutty-terminal", version = "1.0.0" }
+nutty-ssh = { path = "crates/nutty-ssh", version = "1.0.0" }
+nutty-ai = { path = "crates/nutty-ai", version = "1.0.0" }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[package]
+name = "nutty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Native GPUI desktop frontend for Nutty"
+
+[[bin]]
+name = "Nutty"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSString", "NSProcessInfo"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage"] }
+
+[dependencies]
+nutty-core.workspace = true
+nutty-terminal.workspace = true
+nutty-ssh.workspace = true
+nutty-ai.workspace = true
+alacritty_terminal.workspace = true
+anyhow.workspace = true
+async-channel.workspace = true
+dirs.workspace = true
+gpui-kit.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+rig-core.workspace = true
+
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[build-dependencies]
+winresource = "0.1.34"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[lints]
+workspace = true
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package.gpui-pre]
+opt-level = 2
+
+[profile.dev.package.alacritty_terminal]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

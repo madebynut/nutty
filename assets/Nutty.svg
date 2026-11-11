@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>Nutty — nut terminal</title>
+  <desc>A white acorn with a terminal prompt cut into its shell, on a flat black rounded square.</desc>
+  <rect x="64" y="64" width="896" height="896" rx="128" fill="#000"/>
+  <g fill="#fff">
+    <path d="M486 280v-44c0-28 16-48 44-56 15-4 30 5 34 20s-5 30-20 34c-4 1-6 4-6 9v37h-52Z"/>
+    <path d="M258 392c8-84 109-138 254-138s246 54 254 138c1 15-10 28-26 28H284c-16 0-27-13-26-28Z"/>
+    <path d="M290 454h444v78c0 123-60 222-194 284-18 9-38 9-56 0-134-62-194-161-194-284v-78Z"/>
+  </g>
+  <g stroke="#000" stroke-width="32" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m391 519 80 73-80 73"/>
+    <path d="M552 665h82"/>
+  </g>
+</svg>
