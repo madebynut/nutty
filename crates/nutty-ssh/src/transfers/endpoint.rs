@@ -296,8 +296,12 @@ impl Endpoint {
                         )
                         .context("无法保留目标文件所有者和组")?;
                     }
+                    // FlushFileBuffers on Windows requires a handle opened for writing.
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&source)?
+                        .sync_all()?;
                     std::fs::set_permissions(&source, original.permissions())?;
-                    std::fs::File::open(&source)?.sync_all()?;
                     std::fs::rename(&source, &target)?;
                     #[cfg(unix)]
                     std::fs::File::open(Path::new(&target).parent().context("缺少目标目录")?)?
@@ -381,8 +385,8 @@ impl Endpoint {
                     .into_os_string()
                     .into_string()
                     .map_err(|_| anyhow::anyhow!("路径不是 UTF-8"))?;
-                #[cfg(windows)]
-                let path = path.replace('\\', "/");
+                // Preserve Windows verbatim/UNC prefixes. Forward slashes are not
+                // interchangeable inside a verbatim path returned by canonicalize.
                 Ok(path)
             }
             Self::Remote(s) => {
@@ -632,6 +636,12 @@ pub(super) fn valid_name(name: &str) -> Result<()> {
 pub(super) fn join(root: &str, relative: &str) -> String {
     if relative.is_empty() {
         root.into()
+    } else if cfg!(windows) && (root.starts_with(r"\\") || root.as_bytes().get(1) == Some(&b':')) {
+        format!(
+            "{}\\{}",
+            root.trim_end_matches(['/', '\\']),
+            relative.replace('/', "\\")
+        )
     } else {
         format!("{}/{}", root.trim_end_matches('/'), relative)
     }

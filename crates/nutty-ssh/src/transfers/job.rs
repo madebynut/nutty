@@ -82,7 +82,7 @@ impl Job {
     fn stage(&self) -> String {
         let parent = self
             .target()
-            .rsplit_once('/')
+            .rsplit_once(['/', '\\'])
             .map(|(p, _)| p)
             .unwrap_or_default();
         endpoint::join(parent, &format!(".nutty-{}.part", self.id))
@@ -271,7 +271,7 @@ impl Job {
     ) -> Result<()> {
         if self.resolution == Resolution::KeepBoth {
             let path = self.target().to_owned();
-            let (parent, name) = path.rsplit_once('/').context("缺少目标目录")?;
+            let (parent, name) = path.rsplit_once(['/', '\\']).context("缺少目标目录")?;
             let (stem, extension) = name
                 .rsplit_once('.')
                 .filter(|(stem, _)| !stem.is_empty())
