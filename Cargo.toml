@@ -34,7 +34,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 flate2 = "1.1.11"
 rmcp = { version = "3.9.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 agent-client-protocol = { version = "5.0.0", features = ["process"] }
-russh = "0.65.1"
+russh = { git = "https://github.com/Eugeny/russh", branch = "main" }
 russh-sftp = "3.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
