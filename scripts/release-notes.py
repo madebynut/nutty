@@ -7,8 +7,8 @@ import sys
 import tomllib
 
 root = pathlib.Path(__file__).resolve().parent.parent
-version = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]["package"]["version"]
-changelog = (root / "CHANGELOG.md").read_text()
+version = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
+changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
 match = re.search(
     rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)", changelog, re.M | re.S
 )
