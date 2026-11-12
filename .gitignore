@@ -23,10 +23,9 @@ rustc-ice-*.txt
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-docs/
-
 # Local distribution artifacts and desktop metadata
 /dist/
+/docs/
 .DS_Store
 __pycache__/
 *.pyc
