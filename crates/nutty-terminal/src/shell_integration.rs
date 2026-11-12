@@ -57,19 +57,21 @@ pub fn configure(command: &mut CommandBuilder, shell: &Path) -> Result<bool> {
 
 // Use -Command so the integration works with the default execution policy. User
 // profiles run normally; their prompt is preserved and no profile file is edited.
+// ConPTY delivers the returned prompt, but drops OSC written with [Console]::Write.
+// D, CurrentDir, A, and B therefore travel in that string, on the same path as 133;B.
 const POWERSHELL_INIT: &str = r#"$global:__NuttyPrompt = $function:prompt
 function global:prompt {
     $nuttySucceeded = $?
     $esc = [char]27; $bel = [char]7
     $code = if ($nuttySucceeded) { 0 } else { 1 }
-    [Console]::Write("${esc}]133;D;${code}${bel}")
     $location = Get-Location
-    if ($location.Provider.Name -eq 'FileSystem' -and $location.Path -notmatch '[\x00-\x1f\x7f]') {
-        [Console]::Write("${esc}]1337;CurrentDir=$($location.Path)${bel}")
+    $prefix = "${esc}]133;D;${code}${bel}"
+    if ($location.Provider.Name -eq 'FileSystem' -and $location.ProviderPath -notmatch '[\x00-\x1f\x7f]') {
+        $prefix += "${esc}]1337;CurrentDir=$($location.ProviderPath)${bel}"
     }
-    [Console]::Write("${esc}]133;A${bel}")
+    $prefix += "${esc}]133;A${bel}"
     $text = if ($global:__NuttyPrompt) { & $global:__NuttyPrompt } else { "PS $location> " }
-    "$text${esc}]133;B${bel}"
+    "$prefix$text${esc}]133;B${bel}"
 }
 "#;
 

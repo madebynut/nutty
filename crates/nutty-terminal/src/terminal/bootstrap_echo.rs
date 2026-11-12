@@ -90,16 +90,22 @@ impl Echo {
         for (start, column) in candidates {
             let mut screen = scratch_screen(self.columns, column, before.len() - start);
             let mut parser: Processor = Processor::new();
-            for (offset, byte) in before[start..].iter().enumerate() {
-                parser.advance(&mut screen, std::slice::from_ref(byte));
-                if *byte != b'\n' {
-                    continue;
+            let echoed = &before[start..];
+            for (offset, byte) in echoed.iter().enumerate() {
+                // A shell can print the nonce before the line discipline echoes CR.
+                // The command is already complete, with the cursor still on its last row.
+                if *byte == b'\r' && echo_matches(&screen, column, expected) {
+                    let mut stop = start + offset + 1;
+                    if before.get(stop) == Some(&b'\n') {
+                        stop += 1;
+                    }
+                    spans.push((start, stop));
+                    break;
                 }
-                let text = screen.bounds_to_string(
-                    Point::new(Line(0), Column(column)),
-                    screen.grid().cursor.point,
-                );
-                if text.trim_end() == expected {
+                parser.advance(&mut screen, std::slice::from_ref(byte));
+                if (*byte == b'\n' || offset + 1 == echoed.len())
+                    && echo_matches(&screen, column, expected)
+                {
                     spans.push((start, start + offset + 1));
                     break;
                 }
@@ -156,6 +162,17 @@ impl Dimensions for Size {
     }
 }
 type EchoScreen = Term<DiscardEvents>;
+
+fn echo_matches(screen: &EchoScreen, column: usize, expected: &str) -> bool {
+    screen
+        .bounds_to_string(
+            Point::new(Line(0), Column(column)),
+            screen.grid().cursor.point,
+        )
+        .trim_end()
+        == expected
+}
+
 fn scratch_screen(columns: usize, column: usize, bytes: usize) -> EchoScreen {
     let columns = columns.max(2);
     let size = Size {
@@ -192,6 +209,75 @@ mod tests {
                 "{shell} exceeds canonical input limit: {} bytes",
                 echo.wire.len()
             );
+        }
+    }
+
+    #[test]
+    fn dash_bootstrap_echo_is_removed_at_prompt_columns() {
+        let source = crate::shell_integration::remote_command("dash").expect("dash");
+        for width in [40, 80, 100] {
+            for column in [0, 18] {
+                let echo = Echo::new(&source, width, column);
+                let echoed = echo.wire().replace('\r', "\r\n");
+                let mut input = echoed.into_bytes();
+                input.extend_from_slice(&echo.marker);
+                input.extend_from_slice(b"fixture@target:~$ ");
+                let mut state = Some(Echo {
+                    wire: echo.wire.clone(),
+                    marker: echo.marker.clone(),
+                    bytes: Vec::new(),
+                    columns: width,
+                    column,
+                    started: Instant::now(),
+                });
+                let output = Echo::filter(&mut state, &input);
+                let text = String::from_utf8(output.to_vec()).expect("utf-8");
+                assert!(
+                    !text.contains("__nutty_"),
+                    "width {width} column {column}: {text}"
+                );
+                assert!(state.is_none());
+
+                let echo = Echo::new(&source, width, column);
+                let mut early = echo.wire().trim_end().as_bytes().to_vec();
+                early.extend_from_slice(&echo.marker);
+                early.extend_from_slice(b"\r\nfixture@target:~$ ");
+                let mut state = Some(Echo {
+                    wire: echo.wire.clone(),
+                    marker: echo.marker.clone(),
+                    bytes: Vec::new(),
+                    columns: width,
+                    column,
+                    started: Instant::now(),
+                });
+                let output = Echo::filter(&mut state, &early);
+                let text = String::from_utf8(output.to_vec()).expect("utf-8");
+                assert!(
+                    !text.contains("__nutty_"),
+                    "marker before newline, width {width} column {column}: {text}"
+                );
+                assert!(text.contains("fixture@target:~$"));
+
+                let echo = Echo::new(&source, width, column);
+                let mut carriage = echo.wire().trim_end().as_bytes().to_vec();
+                carriage.push(b'\r');
+                carriage.extend_from_slice(&echo.marker);
+                carriage.extend_from_slice(b"\nfixture@target:~$ ");
+                let mut state = Some(Echo {
+                    wire: echo.wire.clone(),
+                    marker: echo.marker.clone(),
+                    bytes: Vec::new(),
+                    columns: width,
+                    column,
+                    started: Instant::now(),
+                });
+                let output = Echo::filter(&mut state, &carriage);
+                let text = String::from_utf8(output.to_vec()).expect("utf-8");
+                assert!(
+                    !text.contains("__nutty_"),
+                    "carriage return before marker, width {width} column {column}: {text}"
+                );
+            }
         }
     }
 
