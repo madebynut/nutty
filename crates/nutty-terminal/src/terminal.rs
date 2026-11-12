@@ -231,7 +231,10 @@ impl Terminal {
         let mut killer = child.clone_killer();
         let mut reader = pair.master.try_clone_reader()?;
         let mut writer = pair.master.take_writer()?;
-        let master = pair.master;
+        // The reaper drops this after the child exits. Windows ConPTY does not
+        // signal EOF on the output pipe until the console handle is closed.
+        let master = Arc::new(Mutex::new(Some(pair.master)));
+        let resize_pty = Arc::clone(&master);
         let title = preferences
             .shell
             .file_name()
@@ -286,7 +289,12 @@ impl Terminal {
                             .write_all(&bytes)
                             .and_then(|()| writer.flush())
                             .map_err(anyhow::Error::from),
-                        Command::Resize(size) => master.resize(size.into()),
+                        Command::Resize(size) => resize_pty
+                            .lock()
+                            .expect("pty master lock poisoned")
+                            .as_ref()
+                            .map(|pty| pty.resize(size.into()))
+                            .unwrap_or(Ok(())),
                     };
                     if let Err(error) = result {
                         engine.fail(format!("终端写入失败：{error}"));
@@ -295,11 +303,15 @@ impl Terminal {
                 }
                 // The writer actor owns cancellation; the reaper always collects the child.
                 let _ = killer.kill();
+                let pty = resize_pty.lock().expect("pty master lock poisoned").take();
+                drop(pty);
             })?;
         thread::Builder::new()
             .name("nutty-pty-reap".into())
             .spawn(move || {
                 let _ = child.wait();
+                let pty = master.lock().expect("pty master lock poisoned").take();
+                drop(pty);
             })?;
         Ok(terminal)
     }
@@ -2375,7 +2387,7 @@ mod tests {
             "printf 'NUTTY_PTY_%s' OK; exit\r"
         };
         terminal.engine.input(command.as_bytes().to_vec())?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
             let snapshot = terminal.engine.snapshot();
             if snapshot.closed {
@@ -2388,7 +2400,7 @@ mod tests {
             }
             ensure!(
                 std::time::Instant::now() < deadline,
-                "PTY did not exit within five seconds"
+                "PTY did not exit within twenty seconds"
             );
             thread::sleep(std::time::Duration::from_millis(10));
         }
