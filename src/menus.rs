@@ -9,22 +9,28 @@ use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
 use gpui_kit::{App, KeyBinding, Menu, MenuItem, SystemMenuType};
 
 pub(crate) fn install(cx: &mut App) {
-    cx.set_menus([
-        Menu::new("Nutty").items([
-            MenuItem::action(crate::i18n::text("关于 Nutty"), About),
-            MenuItem::separator(),
-            MenuItem::action(crate::i18n::text("命令面板…"), CommandPalette),
-            MenuItem::action(crate::i18n::text("设置…"), OpenSettings),
-            MenuItem::action(crate::i18n::text("键盘快捷键"), KeyboardShortcuts),
-            MenuItem::separator(),
+    let mut application = vec![
+        MenuItem::action(crate::i18n::text("关于 Nutty"), About),
+        MenuItem::separator(),
+        MenuItem::action(crate::i18n::text("命令面板…"), CommandPalette),
+        MenuItem::action(crate::i18n::text("设置…"), OpenSettings),
+        MenuItem::action(crate::i18n::text("键盘快捷键"), KeyboardShortcuts),
+        MenuItem::separator(),
+    ];
+    // Services and application hiding exist only in AppKit; elsewhere they are no-ops.
+    if cfg!(target_os = "macos") {
+        application.extend([
             MenuItem::os_submenu(crate::i18n::text("服务"), SystemMenuType::Services),
             MenuItem::separator(),
             MenuItem::action(crate::i18n::text("隐藏 Nutty"), Hide),
             MenuItem::action(crate::i18n::text("隐藏其他应用"), HideOthers),
             MenuItem::action(crate::i18n::text("显示全部"), ShowAll),
             MenuItem::separator(),
-            MenuItem::action(crate::i18n::text("退出 Nutty…"), Quit),
-        ]),
+        ]);
+    }
+    application.push(MenuItem::action(crate::i18n::text("退出 Nutty…"), Quit));
+    cx.set_menus([
+        Menu::new("Nutty").items(application),
         Menu::new(crate::i18n::text("编辑")).items([
             MenuItem::action(crate::i18n::text("撤销"), Undo),
             MenuItem::action(crate::i18n::text("重做"), Redo),
@@ -94,11 +100,11 @@ pub(crate) fn bind_keys(cx: &mut App) {
             SplitDown,
             None,
         ),
-        KeyBinding::new(if mac { "cmd-h" } else { "ctrl-shift-h" }, Hide, None),
-        KeyBinding::new(
-            if mac { "cmd-alt-h" } else { "ctrl-shift-alt-h" },
-            HideOthers,
-            None,
-        ),
     ]);
+    if mac {
+        cx.bind_keys([
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("cmd-alt-h", HideOthers, None),
+        ]);
+    }
 }

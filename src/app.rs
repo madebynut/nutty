@@ -328,6 +328,7 @@ enum BackendEvent {
         result: Result<()>,
     },
     Transfers,
+    UpdateAvailable(crate::update::Release),
     Ai {
         pane: Uuid,
         session: Uuid,
@@ -408,6 +409,10 @@ pub(crate) struct WorkspaceView {
     filter: Entity<InputState>,
     prompts: VecDeque<HostPrompt>,
     clipboard_pane: Option<Uuid>,
+    /// A newer release found at startup; cleared when dismissed for this session.
+    update: Option<crate::update::Release>,
+    /// Pending OSC 52 write awaiting confirmation: the requesting pane and its text.
+    clipboard_write: Option<(Uuid, String)>,
     clipboard_needs_focus: bool,
     auth_dialog: Option<AuthDialog>,
     pending_authentication: VecDeque<AuthPrompt>,
@@ -440,6 +445,7 @@ pub(crate) struct WorkspaceView {
     _prompts_task: Task<()>,
     _filter_subscription: Subscription,
     _palette_subscription: Subscription,
+    _forward_bind_subscription: Subscription,
 }
 
 impl WorkspaceView {
@@ -534,6 +540,9 @@ impl WorkspaceView {
                 .placeholder(crate::i18n::text("备份密码 · 至少 8 字节"))
         });
         let forward_bind = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1:8080"));
+        // Re-render while typing so the exposure warning follows the listen address.
+        let forward_bind_subscription =
+            cx.subscribe(&forward_bind, |_, _, _: &InputEvent, cx| cx.notify());
         let forward_target = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1:80"));
         let (workspace_writer, mut workspace_errors) = {
             let _guard = runtime.enter();
@@ -604,6 +613,8 @@ impl WorkspaceView {
             filter,
             prompts: VecDeque::new(),
             clipboard_pane: None,
+            clipboard_write: None,
+            update: None,
             clipboard_needs_focus: false,
             auth_dialog: None,
             pending_authentication: VecDeque::new(),
@@ -636,12 +647,34 @@ impl WorkspaceView {
             _prompts_task: prompts_task,
             _filter_subscription: filter_subscription,
             _palette_subscription: palette_subscription,
+            _forward_bind_subscription: forward_bind_subscription,
         };
         view.sync_component_theme(cx);
         view.restore_workspace(window, cx);
         view.start_workspace_checkpoints(window, cx);
+        view.check_for_update();
         cx.defer_in(window, |view, window, cx| view.focus_terminal(window, cx));
         view
+    }
+
+    /// One quiet check per launch, after startup work has settled. Failures (offline,
+    /// rate limits, proxies) are logged at debug level and never shown.
+    fn check_for_update(&mut self) {
+        if !self.store.profile.preferences.check_updates {
+            return;
+        }
+        let events = self.events.clone();
+        self.launch(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            match crate::update::check(env!("CARGO_PKG_VERSION")).await {
+                Ok(Some(release)) => {
+                    tracing::info!(version = %release.version, "newer Nutty release available");
+                    let _ = events.send(BackendEvent::UpdateAvailable(release)).await;
+                }
+                Ok(None) => tracing::debug!("Nutty is up to date"),
+                Err(error) => tracing::debug!(error = format!("{error:#}"), "update check failed"),
+            }
+        });
     }
 
     fn launch(&mut self, future: impl std::future::Future<Output = ()> + Send + 'static) {
@@ -897,6 +930,9 @@ impl WorkspaceView {
                     workspace.clipboard_pane = Some(id);
                     workspace.clipboard_needs_focus = true;
                 }
+                PaneEvent::ClipboardWrite(text) => {
+                    workspace.remote_clipboard_write(id, text.clone(), cx);
+                }
                 _ => {}
             }
             cx.notify();
@@ -1064,6 +1100,14 @@ impl WorkspaceView {
             cancel.cancel();
         }
         self.panes.remove(&id);
+        // A closed pane's pending clipboard request must not keep a dialog open.
+        if self
+            .clipboard_write
+            .as_ref()
+            .is_some_and(|(pane, _)| *pane == id)
+        {
+            self.clipboard_write = None;
+        }
         self.tabs.retain_mut(|tab| {
             if !tab.layout.panes().contains(&id) {
                 return true;
@@ -1591,6 +1635,7 @@ impl WorkspaceView {
                 result,
             } => self.receive_forward(rule, request, result),
             BackendEvent::Error(error) => self.status = Some(error),
+            BackendEvent::UpdateAvailable(release) => self.update = Some(release),
         }
         self.advance_authentication(window, cx);
     }
@@ -2009,6 +2054,69 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Shows a message in the status area, for notices produced before the window existed.
+    pub(crate) fn show_status(&mut self, text: String, cx: &mut Context<Self>) {
+        self.status = Some(text);
+        cx.notify();
+    }
+
+    /// The window opens with a transparent title bar. macOS keeps its native traffic
+    /// lights; Windows, and Linux compositors without server-side decorations (GNOME
+    /// on Wayland), need an app-drawn bar for dragging and the window buttons.
+    fn draws_title_bar(window: &Window) -> bool {
+        if cfg!(windows) {
+            return true;
+        }
+        cfg!(target_os = "linux")
+            && matches!(
+                window.window_decorations(),
+                gpui_kit::Decorations::Client { .. }
+            )
+    }
+
+    /// Answers only the host identity prompt that was rendered. If it already closed
+    /// (timeout or cancellation), the click is ignored and the next prompt is shown.
+    fn answer_host_prompt(&mut self, shown: Uuid, trust: bool) {
+        if let Some(prompt) = take_shown_prompt(&mut self.prompts, shown) {
+            let _ = prompt.answer.send(trust);
+        }
+        self.prompts.retain(|prompt| !prompt.answer.is_closed());
+    }
+
+    /// Applies the clipboard-write policy to text a pane's program sent with OSC 52.
+    fn remote_clipboard_write(&mut self, pane: Uuid, text: String, cx: &mut Context<Self>) {
+        match self.store.profile.preferences.terminal.clipboard_write {
+            crate::config::ClipboardWrite::Allow => {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+            }
+            crate::config::ClipboardWrite::Notify => {
+                let count = text.chars().count();
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+                self.notify(
+                    &crate::i18n::localize(format!("终端程序已写入剪贴板（{count} 个字符）")),
+                    cx,
+                );
+            }
+            crate::config::ClipboardWrite::Ask => {
+                // Only the latest request is offered; earlier unanswered text is discarded.
+                self.clipboard_write = Some((pane, text));
+                self.clipboard_needs_focus = true;
+            }
+        }
+        cx.notify();
+    }
+
+    fn answer_clipboard_write(&mut self, allow: bool, cx: &mut Context<Self>) {
+        self.clipboard_needs_focus = false;
+        if let Some((pane, text)) = self.clipboard_write.take()
+            && allow
+            && self.panes.contains_key(&pane)
+        {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+        }
+        cx.notify();
+    }
+
     fn answer_clipboard(&mut self, cx: &mut Context<Self>, text: Option<&str>) {
         self.clipboard_needs_focus = false;
         if let Some(id) = self.clipboard_pane.take()
@@ -2033,6 +2141,7 @@ impl WorkspaceView {
             || self.overlay.is_some()
             || !self.prompts.is_empty()
             || self.clipboard_pane.is_some()
+            || self.clipboard_write.is_some()
             || self
                 .auth_dialog
                 .as_ref()
@@ -2558,6 +2667,10 @@ impl WorkspaceView {
                         .child(crate::i18n::text("监听地址")),
                 )
                 .child(crate::controls::input(&self.forward_bind, cx).w_full())
+                .children(
+                    self.forward_bind_warning(cx)
+                        .map(forwarding::warning_notice),
+                )
                 .child(
                     div()
                         .text_size(px(12.))
@@ -2728,6 +2841,7 @@ impl WorkspaceView {
             .iter()
             .find(|prompt| !prompt.answer.is_closed())
         {
+            let shown = prompt.id;
             return Some(
                 modal_container(p)
                     .child(
@@ -2774,12 +2888,8 @@ impl WorkspaceView {
                                         crate::controls::button("reject-host")
                                             .ghost()
                                             .label(crate::i18n::text("取消"))
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.prompts
-                                                    .retain(|prompt| !prompt.answer.is_closed());
-                                                if let Some(prompt) = view.prompts.pop_front() {
-                                                    let _ = prompt.answer.send(false);
-                                                }
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.answer_host_prompt(shown, false);
                                                 cx.notify();
                                             })),
                                     )
@@ -2787,12 +2897,8 @@ impl WorkspaceView {
                                         crate::controls::button("trust-host")
                                             .primary()
                                             .label(crate::i18n::text("信任并连接"))
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.prompts
-                                                    .retain(|prompt| !prompt.answer.is_closed());
-                                                if let Some(prompt) = view.prompts.pop_front() {
-                                                    let _ = prompt.answer.send(true);
-                                                }
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.answer_host_prompt(shown, true);
                                                 cx.notify();
                                             })),
                                     ),
@@ -2849,6 +2955,85 @@ impl WorkspaceView {
                                                     .read_from_clipboard()
                                                     .and_then(|item| item.text());
                                                 view.answer_clipboard(cx, text.as_deref());
+                                            })),
+                                    ),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if let Some((pane, text)) = &self.clipboard_write
+            && self.panes.contains_key(pane)
+        {
+            return Some(
+                modal_container(p)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_5()
+                            .p_6()
+                            .w(px(560.))
+                            .rounded_xl()
+                            .bg(rgb(p.sidebar))
+                            .border_1()
+                            .border_color(rgb(p.border))
+                            .child(
+                                div()
+                                    .text_size(px(18.))
+                                    .child(crate::i18n::text("终端程序请求写入剪贴板")),
+                            )
+                            .child(div().text_size(px(12.)).text_color(rgb(p.muted)).child(
+                                crate::i18n::text(
+                                    "粘贴前请核对内容，尤其是多行命令。拒绝不会改动剪贴板。",
+                                ),
+                            ))
+                            .child(
+                                div()
+                                    .id("clipboard-write-preview")
+                                    .max_h(px(180.))
+                                    .overflow_y_scroll()
+                                    .p_3()
+                                    .rounded_md()
+                                    .bg(rgb(p.base))
+                                    .border_1()
+                                    .border_color(rgb(p.border))
+                                    .font(
+                                        crate::fonts::FontPair::terminal(
+                                            &self.store.profile.preferences,
+                                            cx,
+                                        )
+                                        .latin,
+                                    )
+                                    .text_size(px(12.))
+                                    .child(clipboard_preview(text)),
+                            )
+                            .child(div().text_size(px(12.)).text_color(rgb(p.muted)).child(
+                                crate::i18n::localize(format!(
+                                    "共 {} 个字符，{} 行",
+                                    text.chars().count(),
+                                    text.lines().count().max(1)
+                                )),
+                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        crate::controls::button("deny-clipboard-write")
+                                            .ghost()
+                                            .label(crate::i18n::text("拒绝"))
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.answer_clipboard_write(false, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        crate::controls::button("allow-clipboard-write")
+                                            .primary()
+                                            .label(crate::i18n::text("写入剪贴板"))
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.answer_clipboard_write(true, cx);
                                             })),
                                     ),
                             ),
@@ -3200,6 +3385,11 @@ impl Render for WorkspaceView {
                         cx.stop_propagation();
                         return;
                     }
+                    if view.clipboard_write.is_some() && event.keystroke.key == "escape" {
+                        view.answer_clipboard_write(false, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     if view.overlay.is_some()
                         || view.modal.is_some()
                         || view.connection_removal.is_some()
@@ -3207,6 +3397,7 @@ impl Render for WorkspaceView {
                         || view.file_action.is_some()
                         || !view.prompts.is_empty()
                         || view.clipboard_pane.is_some()
+                        || view.clipboard_write.is_some()
                         || view
                             .auth_dialog
                             .as_ref()
@@ -3240,6 +3431,22 @@ impl Render for WorkspaceView {
                     }
                 }),
             )
+            .when(Self::draws_title_bar(window), |root| {
+                root.child(
+                    gpui_kit::component::TitleBar::new()
+                        .bg(rgb(p.sidebar))
+                        .border_color(rgb(p.border))
+                        .on_close_window(cx.listener(|view, _, window, cx| {
+                            view.request_quit(window, cx);
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(p.muted))
+                                .child("Nutty"),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -3479,6 +3686,37 @@ impl Render for WorkspaceView {
                                             )
                                     }),
                             )
+                            .children(self.update.as_ref().map(|release| {
+                                let url = release.url.clone();
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .id("status-update")
+                                            .cursor_pointer()
+                                            .text_color(rgb(p.accent))
+                                            .child(crate::i18n::localize(format!(
+                                                "新版本 {} 可用",
+                                                release.version
+                                            )))
+                                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                                    )
+                                    .child(
+                                        icon_button(
+                                            "status-dismiss-update",
+                                            IconName::X,
+                                            crate::i18n::text("本次不再提示"),
+                                        )
+                                        .on_click(
+                                            cx.listener(|view, _, _, cx| {
+                                                view.update = None;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                            }))
                             .child(crate::i18n::localize(format!(
                                 "{} 会话   ·   UTF-8",
                                 self.panes.len()
@@ -3538,6 +3776,25 @@ fn modal_container(p: Palette) -> gpui_kit::Div {
         .bg(rgba(0x00000088))
         .text_color(rgb(p.text))
 }
+/// Bounded, visible rendering of clipboard text: line breaks stay visible as ↵,
+/// tabs as →, and other control characters as U+FFFD so nothing is hidden.
+fn clipboard_preview(text: &str) -> String {
+    const LIMIT: usize = 2000;
+    let mut preview = String::new();
+    for character in text.chars().take(LIMIT) {
+        match character {
+            '\n' => preview.push_str("↵\n"),
+            '\r' => preview.push('␍'),
+            '\t' => preview.push('→'),
+            character if character.is_control() => preview.push('\u{fffd}'),
+            character => preview.push(character),
+        }
+    }
+    if text.chars().nth(LIMIT).is_some() {
+        preview.push('…');
+    }
+    preview
+}
 fn remote_path(directory: &str, name: &str) -> String {
     format!("{}/{name}", directory.trim_end_matches('/'))
 }
@@ -3549,6 +3806,13 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / (1024. * 1024.))
     }
+}
+
+/// Removes the host identity prompt the user saw. Never falls back to another queued
+/// prompt, so a click can only approve the host and fingerprint that were displayed.
+fn take_shown_prompt(prompts: &mut VecDeque<HostPrompt>, shown: Uuid) -> Option<HostPrompt> {
+    let index = prompts.iter().position(|prompt| prompt.id == shown)?;
+    prompts.remove(index)
 }
 
 fn history_tool(current: Tool, active: Option<Uuid>, requested: Uuid, open: bool) -> Tool {
@@ -3570,5 +3834,56 @@ mod history_tests {
         assert!(history_tool(Tool::History, Some(second), second, true) == Tool::Hidden);
         assert!(history_tool(Tool::History, Some(second), second, false) == Tool::History);
         assert!(history_tool(Tool::Files, Some(first), first, true) == Tool::History);
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    fn prompt(host: &str) -> (HostPrompt, tokio::sync::oneshot::Receiver<bool>) {
+        let (answer, receiver) = tokio::sync::oneshot::channel();
+        let prompt = HostPrompt {
+            id: Uuid::new_v4(),
+            host: host.into(),
+            fingerprint: format!("SHA256:{host}"),
+            answer,
+        };
+        (prompt, receiver)
+    }
+
+    #[test]
+    fn host_decisions_apply_only_to_the_prompt_that_was_shown() {
+        let (shown, mut shown_answer) = prompt("shown.example:22");
+        let (queued, mut queued_answer) = prompt("queued.example:22");
+        let shown_id = shown.id;
+        let mut prompts = VecDeque::from([shown, queued]);
+        // The shown prompt timed out and was dropped before the click.
+        drop(prompts.pop_front());
+        assert!(take_shown_prompt(&mut prompts, shown_id).is_none());
+        assert_eq!(prompts.len(), 1, "the unseen prompt stays queued");
+        assert!(queued_answer.try_recv().is_err(), "and is not answered");
+        assert!(shown_answer.try_recv().is_err());
+
+        let (visible, mut visible_answer) = prompt("visible.example:22");
+        let visible_id = visible.id;
+        prompts.push_front(visible);
+        let taken = take_shown_prompt(&mut prompts, visible_id).expect("visible prompt");
+        assert_eq!(taken.host, "visible.example:22");
+        let _ = taken.answer.send(true);
+        assert_eq!(visible_answer.try_recv().ok(), Some(true));
+        assert_eq!(prompts.len(), 1);
+    }
+
+    #[test]
+    fn clipboard_previews_expose_hidden_characters_and_stay_bounded() {
+        assert_eq!(
+            clipboard_preview("curl x | sh\n\x1b[2Kls\tok\r"),
+            "curl x | sh↵\n\u{fffd}[2Kls→ok␍"
+        );
+        let long = clipboard_preview(&"a".repeat(5000));
+        assert!(long.ends_with('…'));
+        assert_eq!(long.chars().count(), 2001);
+        assert_eq!(clipboard_preview("短文本"), "短文本");
     }
 }

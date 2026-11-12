@@ -47,6 +47,8 @@ pub(super) struct IntegrationEditor {
     credential_exists: bool,
     proxy: Entity<SelectState<crate::controls::Choices>>,
     proxy_ids: Vec<Option<Uuid>>,
+    /// Re-renders while the MCP URL is edited so the cleartext warning stays current.
+    _url_subscription: Option<gpui_kit::Subscription>,
 }
 
 impl WorkspaceView {
@@ -866,6 +868,12 @@ impl WorkspaceView {
             .unwrap_or_default()
         };
         let data = cx.new(|cx| TextareaState::new(window, cx).default_value(initial));
+        let url_subscription = form.fields.get("url").map(|input| {
+            cx.subscribe(
+                input,
+                |_, _, _: &gpui_kit::component::input::InputEvent, cx| cx.notify(),
+            )
+        });
         self.integration_editor = Some(IntegrationEditor {
             id: id.unwrap_or_else(Uuid::new_v4),
             saving: false,
@@ -877,6 +885,7 @@ impl WorkspaceView {
             credential_exists: bearer || process.is_some_and(|process| process.environment),
             proxy,
             proxy_ids,
+            _url_subscription: url_subscription,
         });
         cx.notify();
     }
@@ -951,6 +960,15 @@ impl WorkspaceView {
                         editor
                             .form
                             .field("url", crate::i18n::text("Streamable HTTP 地址"), cx),
+                    )
+                    .children(
+                        crate::network::cleartext_remote(&editor.form.value("url", cx)).then(
+                            || {
+                                super::forwarding::warning_notice(
+                                    "此地址使用 http 且不在本机：工具调用内容和 Bearer Token 都会明文传输，可能被网络中的设备截获。请尽量改用 https。",
+                                )
+                            },
+                        ),
                     )
                     .child(
                         div()

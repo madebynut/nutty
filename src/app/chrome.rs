@@ -597,6 +597,16 @@ impl WorkspaceView {
                     "{} · 原生终端工作区",
                     env!("CARGO_PKG_VERSION")
                 )))
+                .children(self.update.as_ref().map(|release| {
+                    let url = release.url.clone();
+                    crate::controls::button("about-update")
+                        .primary()
+                        .label(crate::i18n::localize(format!(
+                            "查看新版本 {}",
+                            release.version
+                        )))
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                }))
                 .child("Rust · GPUI Kit · Alacritty · russh · rig")
                 .child(crate::i18n::text("独立设计与实现 · Apache License 2.0"))
                 .child(div().text_size(px(11.)).text_color(rgb(p.muted)).child(

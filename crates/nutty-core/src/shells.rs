@@ -19,6 +19,7 @@ const NAMES: &[&str] = &[
     "pwsh.exe",
     "powershell.exe",
     "cmd.exe",
+    "wsl.exe",
 ];
 
 pub fn installed(current: &Path) -> Vec<PathBuf> {
@@ -41,7 +42,15 @@ pub fn installed(current: &Path) -> Vec<PathBuf> {
             ]);
         }
         if let Some(root) = std::env::var_os("ProgramFiles") {
-            directories.push(PathBuf::from(root).join("PowerShell/7"));
+            let root = PathBuf::from(root);
+            directories.extend([root.join("PowerShell/7"), root.join("Git/bin")]);
+        }
+        // Git for Windows does not add its bin directory to PATH by default.
+        if let Some(root) = std::env::var_os("ProgramFiles(x86)") {
+            directories.push(PathBuf::from(root).join("Git/bin"));
+        }
+        if let Some(root) = std::env::var_os("LOCALAPPDATA") {
+            directories.push(PathBuf::from(root).join("Programs/Git/bin"));
         }
     }
     let registry = std::fs::read_to_string("/etc/shells").unwrap_or_default();

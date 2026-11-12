@@ -1,0 +1,78 @@
+# Dependency policy for every shipped target. Checked by `cargo deny check` in CI and
+# before every release (see .github/workflows). Each exemption states why it is safe
+# and what removes it; review the list whenever GPUI, gpui-kit, keyring or zbus change.
+
+[graph]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+]
+all-features = true
+
+[advisories]
+# Any vulnerability, unsound or yanked crate fails. Unmaintained crates fail unless
+# listed here, so a newly abandoned dependency is still noticed.
+yanked = "deny"
+unmaintained = "all"
+ignore = [
+    # All seven are transitive and have no known vulnerability. None parses
+    # remote-controlled data except font tables from locally installed fonts.
+    # Upstream releases checked on 2026-11-12: gpui-kit 0.9.1 and gpui-pre 0.3.12 are
+    # the newest, and the zbus 6 migration has not reached keyring's Secret Service
+    # store, accesskit or ashpd.
+    { id = "RUSTSEC-2024-0384", reason = "instant: timing shim used by gpui-base/gpui-component; no I/O. Removed when gpui-kit moves to web-time." },
+    { id = "RUSTSEC-2024-0436", reason = "paste: compile-time macro in gpui-component; not present at runtime. Removed when gpui-kit moves to pastey." },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz: text shaping in GPUI and resvg for local fonts and bundled SVG icons only. Removed when GPUI moves to harfrust." },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: font parsing in GPUI/cosmic-text/resvg for locally installed fonts only. Removed when GPUI moves to skrifa." },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: merged into zbus 6, not abandoned; used by the Linux Secret Service store, AT-SPI accessibility and portals. Removed when keyring, accesskit and ashpd adopt zbus 6." },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: merged into zbus 6, not abandoned; same dependents as zvariant." },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: merged into zbus 6, not abandoned; compile-time derive for the same dependents." },
+]
+
+[licenses]
+# Permissive licenses compatible with distributing Nutty under Apache-2.0.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    # Mozilla root certificate data (webpki-root-certs); permits redistribution.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+exceptions = [
+    # MPL-2.0 is file-level copyleft: these crates' own source stays MPL, which only
+    # obliges publishing changes to those files. Nutty does not modify them.
+    { allow = ["MPL-2.0"], crate = "option-ext" },   # dirs -> dirs-sys
+    { allow = ["MPL-2.0"], crate = "dwrote" },       # GPUI DirectWrite (Windows)
+    { allow = ["MPL-2.0"], crate = "cbindgen" },     # build-time code generator only
+]
+
+[licenses.private]
+# Workspace crates are not published (publish = false) and use the repository license.
+ignore = true
+
+[bans]
+# Duplicate major versions are expected across GPUI's dependency tree; reported, not fatal.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# russh is pinned by commit in Cargo.toml (rev = ...) until a crates.io release
+# carries the rsa 0.10 fix this build relies on.
+allow-git = ["https://github.com/Eugeny/russh"]

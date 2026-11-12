@@ -1,10 +1,16 @@
 [workspace]
-members = [".", "crates/nutty-core", "crates/nutty-terminal", "crates/nutty-ssh", "crates/nutty-ai"]
+members = [
+    ".",
+    "crates/nutty-core",
+    "crates/nutty-terminal",
+    "crates/nutty-ssh",
+    "crates/nutty-ai",
+]
 default-members = ["."]
 resolver = "3"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.0-beta.1"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
@@ -24,22 +30,48 @@ keyring = "4.2.0"
 portable-pty = "0.9.0"
 rig-core = { version = "0.46.0", features = ["reqwest"] }
 rig-reqwest = "0.46.0"
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "socks", "stream"] }
+reqwest = { version = "0.13.5", default-features = false, features = [
+    "json",
+    "rustls",
+    "socks",
+    "stream",
+] }
 url = "2.5.8"
 base64 = "0.23.1"
 cursor-icon = "1.2.0"
 memchr = "2.8.3"
 nix = { version = "0.31.3", features = ["signal", "process", "feature"] }
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+image = { version = "0.25.10", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
 flate2 = "1.1.11"
-rmcp = { version = "3.9.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "3.9.0", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+    "reqwest",
+] }
 agent-client-protocol = { version = "5.0.0", features = ["process"] }
-russh = { git = "https://github.com/Eugeny/russh", branch = "main" }
+# Pinned to a reviewed commit; bump deliberately after reviewing upstream changes.
+russh = { git = "https://github.com/Eugeny/russh", rev = "b541663a88381aab9f6af1af7bbadb02e155058a" }
 russh-sftp = "3.0.1"
+semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "io-util", "net", "fs", "macros", "process"] }
+tokio = { version = "1.54.1", features = [
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "io-util",
+    "net",
+    "fs",
+    "macros",
+    "process",
+] }
 tokio-util = { version = "0.7.20", features = ["rt", "compat", "codec"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -50,11 +82,17 @@ zmodem2 = "0.7.3"
 
 rand = "0.10.3"
 tempfile = "3.27.0"
-nutty-core = { path = "crates/nutty-core", version = "1.0.0" }
-nutty-terminal = { path = "crates/nutty-terminal", version = "1.0.0" }
-nutty-ssh = { path = "crates/nutty-ssh", version = "1.0.0" }
-nutty-ai = { path = "crates/nutty-ai", version = "1.0.0" }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+nutty-core = { path = "crates/nutty-core", version = "1.0.0-beta.1" }
+nutty-terminal = { path = "crates/nutty-terminal", version = "1.0.0-beta.1" }
+nutty-ssh = { path = "crates/nutty-ssh", version = "1.0.0-beta.1" }
+nutty-ai = { path = "crates/nutty-ai", version = "1.0.0-beta.1" }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [package]
 name = "nutty"
@@ -71,8 +109,20 @@ path = "src/main.rs"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSString", "NSProcessInfo"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSData",
+    "NSString",
+    "NSProcessInfo",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSImage",
+] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
 
 [dependencies]
 nutty-core.workspace = true

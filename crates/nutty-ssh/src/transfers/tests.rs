@@ -802,3 +802,16 @@ fn malformed_file_metadata_is_not_treated_as_an_empty_file() {
     };
     assert!(endpoint::Metadata::remote(missing_size).is_err());
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_device_names_are_rejected_for_downloads() {
+    for name in [
+        "CON", "con.txt", "CON .txt", "CONIN$", "CONOUT$", "COM1", "LPT9.log", "COM¹", "LPT³",
+    ] {
+        assert!(super::endpoint::valid_name(name).is_err(), "{name:?}");
+    }
+    for name in ["COM10", "CONSOLE.txt", "readme.md"] {
+        assert!(super::endpoint::valid_name(name).is_ok(), "{name:?}");
+    }
+}

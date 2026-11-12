@@ -181,46 +181,75 @@ fn parse(kind: Kind, value: &Value) -> Result<Vec<Model>> {
             !id.trim().is_empty() && id.len() <= 256 && !id.contains(['\r', '\n', '\0']),
             "模型名称无效"
         );
-        let metadata = item
-            .pointer("/effort/supported_levels")
-            .or_else(|| item.pointer("/reasoning/supported_levels"));
-        let reasoning = if let Some(levels) = metadata.and_then(Value::as_array) {
-            let mut reasoning = vec![Reasoning::Auto];
-            if kind == Kind::DeepSeek {
-                reasoning.push(Reasoning::Off);
-            }
-            for level in levels.iter().filter_map(Value::as_str) {
-                if let Some(level) = Reasoning::ALL
-                    .into_iter()
-                    .find(|candidate| candidate.label().eq_ignore_ascii_case(level))
-                    && !reasoning.contains(&level)
-                {
-                    reasoning.push(level);
-                }
-            }
-            reasoning
-        } else {
-            suggested_reasoning(kind, id)
-        };
-        models.push(Model {
-            id: id.into(),
-            reasoning,
-        });
+        models.push(Model { id: id.into() });
     }
     Ok(models)
 }
 
-pub fn suggested_reasoning(kind: Kind, id: &str) -> Vec<Reasoning> {
-    match kind {
-        Kind::DeepSeek if id.contains("v4") || id == "deepseek-flash" => {
-            kind.reasoning_choices().to_vec()
-        }
-        Kind::DeepSeek if id == "deepseek-reasoner" => vec![Reasoning::Auto],
-        _ => vec![Reasoning::Auto],
-    }
+/// Rig's built-in catalog entry for a configured model, if it lists one
+/// (dated snapshots such as `gpt-5-2025-08-07` resolve to their base model).
+fn catalog_spec(kind: Kind, model: &str) -> Option<&'static rig_core::catalog::ModelSpec> {
+    let vendor = rig_core::providers::registry::ProviderId::catalog(kind.catalog_vendor())?;
+    Some(
+        rig_core::catalog::Catalog::builtin()
+            .get(vendor, model)?
+            .spec,
+    )
 }
 
-/// Refreshing a catalog must preserve manual entries and user-selected effort levels.
+/// The reasoning levels to offer for a model, Auto first.
+///
+/// Models Rig's catalog lists get exactly their own levels, including Off when
+/// reasoning can be turned off, and only Auto when they do not reason. Models the
+/// catalog does not list, or lists without known controls, get every effort level.
+pub fn reasoning_levels(kind: Kind, model: &str) -> Vec<Reasoning> {
+    let Some(spec) = catalog_spec(kind, model).filter(|spec| spec.reasoning.levels().is_some())
+    else {
+        return Reasoning::FULL.to_vec();
+    };
+    let mut levels = vec![Reasoning::Auto];
+    for choice in spec.reasoning.choices() {
+        if let Some(level) = Reasoning::ALL
+            .into_iter()
+            .find(|level| level.catalog_name() == Some(choice.name))
+            && !levels.contains(&level)
+        {
+            levels.push(level);
+        }
+    }
+    levels
+}
+
+/// The request setting for `level` on this model; `None` leaves the provider default.
+///
+/// For listed models this is the catalog's own mapping, so a model that takes a
+/// token budget (Claude 4.5, Gemini 2.5) receives a budget instead of an effort
+/// level it would reject. Other models receive the effort level by name.
+pub fn native_reasoning(
+    kind: Kind,
+    model: &str,
+    level: Reasoning,
+) -> Option<rig_core::completion::Reasoning> {
+    use rig_core::completion::{Effort, Reasoning as Native};
+    let name = level.catalog_name()?;
+    if let Some(spec) = catalog_spec(kind, model).filter(|spec| spec.reasoning.levels().is_some())
+        && let Ok(choice) = spec.reasoning.named(name)
+    {
+        return choice.reasoning;
+    }
+    Some(match level {
+        Reasoning::Auto => return None,
+        Reasoning::Off => Native::Off,
+        Reasoning::Minimal => Native::Effort(Effort::Minimal),
+        Reasoning::Low => Native::Effort(Effort::Low),
+        Reasoning::Medium => Native::Effort(Effort::Medium),
+        Reasoning::High => Native::Effort(Effort::High),
+        Reasoning::XHigh => Native::Effort(Effort::XHigh),
+        Reasoning::Max => Native::Effort(Effort::Max),
+    })
+}
+
+/// Refreshing a catalog must preserve manually added models.
 pub fn merge(existing: &mut Vec<Model>, incoming: Vec<Model>) -> Result<()> {
     let additional = incoming
         .iter()
@@ -247,41 +276,25 @@ mod tests {
     };
 
     #[test]
-    fn catalog_metadata_and_refresh_preserve_manual_model_choices() -> Result<()> {
+    fn catalog_listing_and_refresh_preserve_manual_models() -> Result<()> {
         let models = parse(
             Kind::DeepSeek,
             &serde_json::json!({"data":[
-                {"id":"deepseek-flash","effort":{"supported_levels":["low","high","max","future"]}},
+                {"id":"deepseek-flash","effort":{"supported_levels":["low","high","max"]}},
                 {"id":"deepseek-reasoner"}
             ]}),
         )?;
-        assert_eq!(
-            models[0].reasoning,
-            [
-                Reasoning::Auto,
-                Reasoning::Off,
-                Reasoning::Low,
-                Reasoning::High,
-                Reasoning::Max
-            ]
-        );
+        assert_eq!(models.len(), 2);
         let mut configured = vec![
             Model {
                 id: "deepseek-flash".into(),
-                reasoning: vec![Reasoning::Max],
             },
             Model {
                 id: "private-model".into(),
-                reasoning: vec![Reasoning::Low],
             },
         ];
         merge(&mut configured, models)?;
         assert_eq!(configured.len(), 3);
-        assert_eq!(
-            configured[0].reasoning,
-            [Reasoning::Max],
-            "refresh retains user effort selection"
-        );
         assert_eq!(
             configured[1].id, "private-model",
             "manual gateway model survives refresh"

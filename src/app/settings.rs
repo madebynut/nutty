@@ -2,9 +2,9 @@
 
 use super::{BackendEvent, Form, WorkspaceView, icon_button, modal_container};
 use crate::{
-    config::{Appearance, CursorShape, Profile, TerminalOptions},
+    config::{Appearance, ClipboardWrite, CursorShape, Profile, TerminalOptions},
     network::Proxy,
-    provider::{Kind, Model, Provider, Reasoning},
+    provider::{Kind, Model, Provider},
 };
 use anyhow::{Context as _, Result};
 use gpui_kit::assets::IconName;
@@ -120,6 +120,7 @@ impl ThemeEditor {
 
 pub(super) struct TerminalEditor {
     cursor: Entity<SelectState<crate::controls::Choices>>,
+    clipboard: Entity<SelectState<crate::controls::Choices>>,
 }
 
 impl TerminalEditor {
@@ -142,7 +143,20 @@ impl TerminalEditor {
                 cx,
             )
         });
-        Self { cursor }
+        let clipboard = cx.new(|cx| {
+            crate::controls::select_state(
+                ClipboardWrite::ALL
+                    .map(|policy| SharedString::from(policy.label()))
+                    .to_vec(),
+                ClipboardWrite::ALL
+                    .iter()
+                    .position(|policy| *policy == options.clipboard_write)
+                    .map(IndexPath::new),
+                window,
+                cx,
+            )
+        });
+        Self { cursor, clipboard }
     }
 
     pub fn apply(
@@ -161,6 +175,14 @@ impl TerminalEditor {
             Some(2) => CursorShape::Underline,
             _ => CursorShape::Beam,
         };
+        if let Some(policy) = self
+            .clipboard
+            .read(cx)
+            .selected_index(cx)
+            .and_then(|index| ClipboardWrite::ALL.get(index.row))
+        {
+            options.clipboard_write = *policy;
+        }
         options.line_height = form.value("line_height", cx).parse()?;
         options.letter_spacing = form.value("letter_spacing", cx).parse()?;
         options.padding_horizontal = form.value("padding_horizontal", cx).parse()?;
@@ -302,7 +324,6 @@ pub(super) struct RecordEditor {
     proxy: Entity<SelectState<crate::controls::Choices>>,
     proxy_ids: Vec<Option<Uuid>>,
     models: Vec<Model>,
-    expanded_model: Option<String>,
     model_input: Entity<gpui_kit::component::input::InputState>,
     probe: Option<ProviderProbe>,
     probe_status: Option<(bool, String)>,
@@ -452,20 +473,8 @@ impl WorkspaceView {
         }
         if id.len() > 256 || id.contains(['\r', '\n', '\0']) || editor.models.len() >= 512 {
             editor.probe_status = Some((false, crate::i18n::text("模型名称无效或列表已满").into()));
-        } else if editor.models.iter().any(|model| model.id == id) {
-            editor.expanded_model = Some(id);
-        } else {
-            let kind = Kind::ALL[editor
-                .protocol
-                .read(cx)
-                .selected_index(cx)
-                .map(|index| index.row)
-                .unwrap_or(0)];
-            editor.models.push(Model {
-                reasoning: crate::provider_catalog::suggested_reasoning(kind, &id),
-                id: id.clone(),
-            });
-            editor.expanded_model = Some(id);
+        } else if !editor.models.iter().any(|model| model.id == id) {
+            editor.models.push(Model { id });
         }
         editor
             .model_input
@@ -479,12 +488,6 @@ impl WorkspaceView {
             .as_ref()
             .expect("provider editor is open");
         let p = self.palette();
-        let kind = Kind::ALL[editor
-            .protocol
-            .read(cx)
-            .selected_index(cx)
-            .map(|index| index.row)
-            .unwrap_or(0)];
         let query = editor.model_input.read(cx).value().to_lowercase();
         let rows = editor
             .models
@@ -494,124 +497,30 @@ impl WorkspaceView {
             .map(|(index, model)| {
                 let name = model.id.clone();
                 let remove_id = name.clone();
-                let expanded = editor.expanded_model.as_ref() == Some(&name);
+                // Reasoning levels are not configured here: the AI assistant's model
+                // menu offers each model's own levels from Rig's catalog.
                 div()
                     .flex()
-                    .flex_col()
+                    .items_center()
                     .gap_2()
                     .py_2()
+                    .px_2()
                     .border_b_1()
                     .border_color(rgb(p.border))
+                    .child(div().flex_1().min_w_0().text_ellipsis().child(name))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                crate::controls::button(format!("expand-model-{index}"))
-                                    .ghost()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .accessibility_label(format!(
-                                        "{} · {}",
-                                        name,
-                                        crate::i18n::text("推理强度")
-                                    ))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .w_full()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                gpui_kit::component::Icon::new(if expanded {
-                                                    IconName::ChevronDown
-                                                } else {
-                                                    IconName::ChevronRight
-                                                })
-                                                .size_4(),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .text_ellipsis()
-                                                    .child(name.clone()),
-                                            ),
-                                    )
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        if let Some(editor) = &mut view.record_editor {
-                                            editor.expanded_model =
-                                                if expanded { None } else { Some(name.clone()) };
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                icon_button(
-                                    format!("remove-model-{index}"),
-                                    IconName::X,
-                                    crate::i18n::text("移除模型"),
-                                )
-                                .on_click(cx.listener(
-                                    move |view, _, _, cx| {
-                                        if let Some(editor) = &mut view.record_editor {
-                                            editor.models.retain(|model| model.id != remove_id);
-                                        }
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
+                        icon_button(
+                            format!("remove-model-{index}"),
+                            IconName::X,
+                            crate::i18n::text("移除模型"),
+                        )
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            if let Some(editor) = &mut view.record_editor {
+                                editor.models.retain(|model| model.id != remove_id);
+                            }
+                            cx.notify();
+                        })),
                     )
-                    .when(expanded, |row| {
-                        row.child(div().flex().flex_wrap().gap_2().px_2().children(
-                            kind.reasoning_choices().iter().copied().enumerate().map(
-                                |(level_index, level)| {
-                                    let effort_id = model.id.clone();
-                                    let selected = level == Reasoning::Auto
-                                        || model.reasoning.contains(&level);
-                                    crate::controls::button(format!(
-                                        "model-effort-{index}-{level_index}"
-                                    ))
-                                    .compact()
-                                    .h(px(28.))
-                                    .text_size(px(12.))
-                                    .label(level.display_label())
-                                    .accessibility_label(format!(
-                                        "{} · {}",
-                                        model.id,
-                                        level.display_label()
-                                    ))
-                                    .when(selected, |button| {
-                                        button.bg(rgb(p.hover)).text_color(rgb(p.accent)).icon(
-                                            gpui_kit::component::Icon::new(IconName::Check)
-                                                .size_3(),
-                                        )
-                                    })
-                                    .disabled(level == Reasoning::Auto)
-                                    .on_click(cx.listener(
-                                        move |view, _, _, cx| {
-                                            if let Some(model) =
-                                                view.record_editor.as_mut().and_then(|editor| {
-                                                    editor
-                                                        .models
-                                                        .iter_mut()
-                                                        .find(|model| model.id == effort_id)
-                                                })
-                                            {
-                                                if model.reasoning.contains(&level) {
-                                                    model.reasoning.retain(|old| *old != level);
-                                                } else {
-                                                    model.reasoning.push(level);
-                                                }
-                                            }
-                                            cx.notify();
-                                        },
-                                    ))
-                                },
-                            ),
-                        ))
-                    })
             });
         div()
             .flex()
@@ -1033,6 +942,7 @@ impl WorkspaceView {
                                 "record-history" => p.record_history = *value,
                                 "record-sessions" => p.record_sessions = *value,
                                 "restore-workspace" => p.restore_workspace = *value,
+                                "check-updates" => p.check_updates = *value,
                                 "cursor-blink" => p.terminal.cursor_blink = *value,
                                 "unfocused-cursor" => p.terminal.unfocused_cursor = *value,
                                 "copy-on-select" => p.terminal.copy_on_select = *value,
@@ -1100,6 +1010,13 @@ impl WorkspaceView {
                             "目录跟踪",
                             "在会话标题和文件浏览器中显示当前工作目录",
                             p.track_directory,
+                            cx,
+                        ))
+                        .child(self.setting_toggle(
+                            "check-updates",
+                            "检查新版本",
+                            "启动时向 GitHub 查询一次是否有新版本，不发送任何个人信息",
+                            p.check_updates,
                             cx,
                         ))
                         .into_any_element(),
@@ -1321,6 +1238,37 @@ impl WorkspaceView {
                 options.copy_on_select,
                 cx,
             ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .py_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .flex_1()
+                            .min_w_0()
+                            .child(crate::i18n::text("终端程序写入剪贴板"))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(self.palette().muted))
+                                    .child(crate::i18n::text(
+                                        "OSC 52 写入，常见于远端 tmux、vim；读取剪贴板始终询问",
+                                    )),
+                            ),
+                    )
+                    .children(form.terminal.as_ref().map(|editor| {
+                        crate::controls::select(&editor.clipboard, cx)
+                            .w(px(160.))
+                            .flex_shrink_0()
+                            .accessibility_label(crate::i18n::text("终端程序写入剪贴板"))
+                    })),
+            )
             .when(cfg!(target_os = "macos"), |this| {
                 this.child(self.setting_toggle(
                     "option-as-alt",
@@ -1882,7 +1830,6 @@ impl WorkspaceView {
             proxy,
             proxy_ids,
             models,
-            expanded_model: None,
             model_input,
             probe: None,
             probe_status: None,
@@ -1947,9 +1894,8 @@ impl WorkspaceView {
             .min_h_0()
             .overflow_y_scroll()
             .child(editor.form.field("name", crate::i18n::text("名称"), cx));
-        content =
-            if provider {
-                content
+        content = if provider {
+            content
                     .child(
                         div()
                             .flex()
@@ -1962,6 +1908,14 @@ impl WorkspaceView {
                         editor
                             .form
                             .field("endpoint", crate::i18n::text("API 地址"), cx),
+                    )
+                    .children(
+                        crate::network::cleartext_remote(&editor.form.value("endpoint", cx))
+                            .then(|| {
+                                super::forwarding::warning_notice(
+                                    "此 API 地址使用 http 且不在本机：对话内容和 API 密钥都会明文传输，可能被网络中的设备截获。请尽量改用 https。",
+                                )
+                            }),
                     )
                     .child(editor.form.field(
                         "key_secret",
@@ -1996,47 +1950,50 @@ impl WorkspaceView {
                                     })),
                             ),
                     )
-            } else {
-                content
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(crate::i18n::text("代理类型"))
-                            .child(crate::controls::select(&editor.protocol, cx).w_full()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_3()
-                            .child(div().flex_1().min_w_0().child(editor.form.field(
-                                "proxy_host",
-                                crate::i18n::text("代理主机"),
-                                cx,
-                            )))
-                            .child(div().w(px(120.)).child(editor.form.field(
-                                "proxy_port",
-                                crate::i18n::text("端口"),
-                                cx,
-                            ))),
-                    )
-                    .child(div().text_size(px(12.)).text_color(rgb(p.muted)).child(
-                        crate::i18n::text(
+        } else {
+            content
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(crate::i18n::text("代理类型"))
+                        .child(crate::controls::select(&editor.protocol, cx).w_full()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(div().flex_1().min_w_0().child(editor.form.field(
+                            "proxy_host",
+                            crate::i18n::text("代理主机"),
+                            cx,
+                        )))
+                        .child(div().w(px(120.)).child(editor.form.field(
+                            "proxy_port",
+                            crate::i18n::text("端口"),
+                            cx,
+                        ))),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(p.muted))
+                        .child(crate::i18n::text(
                             "SSH 支持 HTTP CONNECT / SOCKS5；HTTPS 代理用于 AI 与 MCP",
-                        ),
-                    ))
-                    .child(
-                        editor
-                            .form
-                            .field("username", crate::i18n::text("用户名 · 可选"), cx),
-                    )
-                    .child(editor.form.field(
-                        "key_secret",
-                        crate::i18n::text("代理密码 · 留空保留"),
-                        cx,
-                    ))
-            };
+                        )),
+                )
+                .child(
+                    editor
+                        .form
+                        .field("username", crate::i18n::text("用户名 · 可选"), cx),
+                )
+                .child(editor.form.field(
+                    "key_secret",
+                    crate::i18n::text("代理密码 · 留空保留"),
+                    cx,
+                ))
+        };
         let footer = div()
             .flex()
             .flex_shrink_0()

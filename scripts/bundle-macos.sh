@@ -25,6 +25,10 @@ cp -p "$task_root/target/$profile/Nutty" "$bundle_binary"
 mv -f "$bundle_binary" "$bundle/Contents/MacOS/Nutty"
 cp "$task_root/assets/Nutty.icns" "$bundle/Contents/Resources/Nutty.icns"
 cp "$task_root/assets/Info.plist" "$bundle/Contents/Info.plist"
+for document in LICENSE CHANGELOG.md SECURITY.md; do
+    cp "$task_root/$document" "$bundle/Contents/Resources/$document"
+done
+sh "$task_root/scripts/third-party-notices.sh" "$bundle/Contents/Resources/THIRD-PARTY-NOTICES.txt"
 signing_identity=${NUTTY_SIGNING_IDENTITY:--}
 if [ "$signing_identity" = - ]; then
     codesign --force --sign - "$bundle"

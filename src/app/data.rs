@@ -234,10 +234,7 @@ impl WorkspaceView {
             return;
         };
         let result = if self.data_replace {
-            Ok(crate::portable::Archive {
-                profile: preview.archive.profile.clone(),
-                secrets: preview.archive.secrets.clone(),
-            })
+            crate::portable::replace(&self.store.profile, &preview.archive)
         } else {
             crate::portable::merge(&self.store.profile, &preview.archive)
         };

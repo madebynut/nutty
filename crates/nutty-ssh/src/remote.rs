@@ -29,6 +29,8 @@ use crate::{
 };
 
 pub struct HostPrompt {
+    /// Identifies the prompt the user saw, so a decision never applies to another host.
+    pub id: Uuid,
     pub host: String,
     pub fingerprint: String,
     pub answer: oneshot::Sender<bool>,
@@ -60,9 +62,14 @@ impl client::Handler for Client {
         if verify_host_key(&self.host, self.port, &key, &self.known_hosts)? {
             return Ok(true);
         }
+        ensure!(
+            recordable_host(&self.host),
+            "主机名包含 known_hosts 不支持的字符，无法记录服务器身份"
+        );
         let (answer, response) = oneshot::channel();
         self.prompts
             .send(HostPrompt {
+                id: Uuid::new_v4(),
                 host: format!("{}:{}", self.host, self.port),
                 fingerprint: key.fingerprint(keys::HashAlg::Sha256).to_string(),
                 answer,
@@ -129,6 +136,18 @@ impl client::Handler for Client {
             };
             tokio::select! {()=target.cancel.cancelled()=>{},_=forwarding=>{}}
         });
+        Ok(())
+    }
+
+    /// Agent forwarding is never requested. Dropping `reply` rejects the channel
+    /// (AdministrativelyProhibited) instead of russh's default accept.
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        _: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _: &mut client::Session,
+    ) -> Result<()> {
+        drop(reply);
         Ok(())
     }
 }
@@ -733,6 +752,17 @@ async fn authenticate_interactive(
     bail!("服务器认证轮次超出限制")
 }
 
+/// known_hosts treats these characters as separators or patterns. Trusting such a name
+/// would record trust for other hosts, or an entry that never matches again.
+fn recordable_host(host: &str) -> bool {
+    !host.is_empty()
+        && !host.chars().any(|character| {
+            character.is_whitespace()
+                || character.is_control()
+                || matches!(character, ',' | '#' | '|' | '*' | '?' | '!' | '[' | ']')
+        })
+}
+
 fn verify_host_key(host: &str, port: u16, key: &keys::PublicKey, path: &Path) -> Result<bool> {
     match std::fs::read(path) {
         Ok(_) => {}
@@ -1299,9 +1329,10 @@ impl Node {
             output.sync_all().await?;
             drop(output);
             ensure!(!cancel.is_cancelled(), "传输已取消");
-            // A hard link provides an atomic no-clobber publish on local filesystems.
-            tokio::fs::hard_link(&temporary, local).await?;
-            tokio::fs::remove_file(&temporary).await?;
+            // Atomic no-clobber publish, including filesystems without hard links.
+            let (from, to) = (temporary.clone(), local.to_path_buf());
+            tokio::task::spawn_blocking(move || nutty_core::files::publish_new(&from, &to))
+                .await??;
             Ok::<_, anyhow::Error>(())
         }
         .await;
@@ -1490,6 +1521,34 @@ async fn socks_target(stream: &mut TcpStream) -> Result<(String, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn known_hosts_only_records_plain_host_names() {
+        for host in [
+            "server.example",
+            "10.0.0.5",
+            "::1",
+            "fe80::1%en0",
+            "中文.example",
+        ] {
+            assert!(recordable_host(host), "{host}");
+        }
+        // Separators would trust several hosts at once; patterns never match exactly.
+        for host in [
+            "",
+            "a,b",
+            "a b",
+            "a\tb",
+            "*.example",
+            "h?st",
+            "!neg",
+            "|1|hash",
+            "[x]",
+            "a#b",
+            "a\nb",
+        ] {
+            assert!(!recordable_host(host), "{host:?}");
+        }
+    }
     #[test]
     fn transfer_future_keeps_the_io_buffer_off_the_thread_stack() {
         let mut source = tokio::io::empty();

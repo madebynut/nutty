@@ -114,6 +114,25 @@ impl Proxy {
     }
 }
 
+/// Whether `url` is plain `http://` to a host other than this machine. Requests and any
+/// credentials sent to it (API keys, bearer tokens) cross the network unencrypted.
+/// Loopback stays quiet because local services such as Ollama normally use http.
+pub fn cleartext_remote(url: &str) -> bool {
+    let Ok(url) = url::Url::parse(url.trim()) else {
+        return false;
+    };
+    url.scheme() == "http"
+        && match url.host() {
+            Some(url::Host::Ipv4(address)) => !address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => !address.is_loopback(),
+            Some(url::Host::Domain(domain)) => {
+                let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+                domain != "localhost" && !domain.ends_with(".localhost")
+            }
+            None => false,
+        }
+}
+
 pub async fn connect(host: &str, port: u16, proxy: Option<&Proxy>) -> Result<TcpStream> {
     tokio::time::timeout(Duration::from_secs(20), async {
         let Some(proxy) = proxy else {
@@ -126,8 +145,12 @@ pub async fn connect(host: &str, port: u16, proxy: Option<&Proxy>) -> Result<Tcp
             "SSH 的 HTTPS 代理需配置 SOCKS5 或 HTTP CONNECT 端点"
         );
         let proxy_port = url.port_or_known_default().unwrap_or(1080);
-        let mut socket =
-            TcpStream::connect((url.host_str().context("代理主机为空")?, proxy_port)).await?;
+        // `host_str` keeps IPv6 brackets, which name resolution rejects.
+        let mut socket = match url.host().context("代理主机为空")? {
+            url::Host::Ipv4(address) => TcpStream::connect((address, proxy_port)).await?,
+            url::Host::Ipv6(address) => TcpStream::connect((address, proxy_port)).await?,
+            url::Host::Domain(domain) => TcpStream::connect((domain, proxy_port)).await?,
+        };
         let password = proxy.password().await?;
         if url.scheme() == "http" {
             let authority = if host.contains(':') {
@@ -310,5 +333,65 @@ mod tests {
         })
         .await
         .context("proxy workflow timed out")?
+    }
+}
+
+#[cfg(test)]
+mod transport_security_tests {
+    use super::*;
+
+    #[test]
+    fn cleartext_warning_covers_remote_http_only() {
+        for url in [
+            "http://api.example.com/v1",
+            "http://192.168.1.10:11434",
+            "HTTP://Example.COM",
+            "http://[2001:db8::1]/mcp",
+        ] {
+            assert!(cleartext_remote(url), "{url}");
+        }
+        for url in [
+            "https://api.example.com",
+            "http://localhost:11434",
+            "http://LOCALHOST.:11434",
+            "http://127.0.0.1:8080",
+            "http://[::1]:11434",
+            "http://ollama.localhost",
+            "not a url",
+            "",
+        ] {
+            assert!(!cleartext_remote(url), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn proxies_at_ipv6_literals_are_reachable() -> Result<()> {
+        // Hosts without IPv6 loopback cannot run this check.
+        let Ok(listener) = tokio::net::TcpListener::bind("[::1]:0").await else {
+            return Ok(());
+        };
+        let port = listener.local_addr()?.port();
+        let serving = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                header.push(socket.read_u8().await?);
+            }
+            socket.write_all(b"HTTP/1.1 200 Connected\r\n\r\n").await?;
+            Ok::<_, anyhow::Error>(())
+        });
+        let proxy = Proxy {
+            id: Uuid::new_v4(),
+            name: "ipv6".into(),
+            url: Protocol::Http.url("::1", port)?,
+            username: String::new(),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            connect("target.example", 22, Some(&proxy)),
+        )
+        .await??;
+        serving.await??;
+        Ok(())
     }
 }

@@ -5,6 +5,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::{
     collections::HashMap,
     io::{Cursor, Read as _},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -422,7 +423,7 @@ impl Graphics {
             }
             Err(error) => Outcome {
                 decode: None,
-                response: (quiet < 2).then(|| reply(id, &format!("EINVAL:{error}"))),
+                response: (quiet < 2).then(|| reply(id, &failure(&error, false))),
                 move_rows: 0,
                 move_columns: 0,
             },
@@ -875,7 +876,7 @@ impl Graphics {
         if decode.query {
             let text = match result {
                 Ok(_) => "OK".to_string(),
-                Err(error) => format!("EINVAL:{error}"),
+                Err(error) => failure(&error, decode.file),
             };
             return (decode.quiet == 0 || (decode.quiet == 1 && text != "OK"))
                 .then(|| reply(decode.id, &text));
@@ -921,7 +922,7 @@ impl Graphics {
             }
             Err(error) => {
                 self.rollback(decode.id);
-                format!("EINVAL:{error}")
+                failure(&error, decode.file)
             }
         };
         (decode.quiet == 0 || (decode.quiet == 1 && text != "OK")).then(|| reply(decode.id, &text))
@@ -1044,6 +1045,41 @@ fn signed(params: &HashMap<String, String>, key: &str, default: i32) -> i32 {
 fn reply(id: u32, text: &str) -> String {
     format!("\x1b_Gi={id};{text}\x1b\\")
 }
+/// Replies are typed into the pane's input, so they carry no control bytes and,
+/// for file media, no OS error detail that would reveal local file state.
+fn failure(error: &anyhow::Error, file: bool) -> String {
+    if file {
+        return "EINVAL:image file unavailable".into();
+    }
+    let text: String = error
+        .to_string()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(256)
+        .collect();
+    format!("EINVAL:{text}")
+}
+/// File media may only name local absolute paths outside kernel pseudo-filesystems.
+fn local_image_path(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        !["/proc", "/sys", "/dev"]
+            .iter()
+            .any(|root| path.starts_with(root))
+    }
+}
 impl Decode {
     pub fn reads_file(&self) -> bool {
         self.file
@@ -1064,9 +1100,12 @@ impl Decode {
                 path.len() <= 4096 && !path.contains('\0'),
                 "invalid image filename"
             );
+            // Resolving a network path would make the OS contact a remote-chosen host
+            // (for example SMB on Windows), so only local absolute paths are accepted.
+            ensure!(local_image_path(Path::new(path)), "invalid image filename");
             let path = std::fs::canonicalize(path)?;
             ensure!(
-                std::fs::metadata(&path)?.is_file(),
+                local_image_path(&path) && std::fs::metadata(&path)?.is_file(),
                 "image payload is not a regular file"
             );
             let mut options = std::fs::OpenOptions::new();
@@ -1394,5 +1433,78 @@ mod tests {
         let denied = graphics.handle(b"a=T,i=3,t=f;L2V0Yy9wYXNzd2Q=", (0, 0), false, (8., 20.));
         assert!(denied.decode.is_none());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod file_media_tests {
+    use super::*;
+
+    #[test]
+    fn file_media_accepts_only_local_absolute_paths() {
+        assert!(!local_image_path(Path::new("relative.png")));
+        assert!(!local_image_path(Path::new("")));
+        #[cfg(not(windows))]
+        {
+            assert!(local_image_path(Path::new("/tmp/a.png")));
+            for kernel in ["/proc/self/environ", "/sys/kernel/notes", "/dev/zero"] {
+                assert!(!local_image_path(Path::new(kernel)), "{kernel}");
+            }
+        }
+        #[cfg(windows)]
+        {
+            assert!(local_image_path(Path::new(r"C:\Users\a.png")));
+            assert!(local_image_path(Path::new(r"\\?\C:\Users\a.png")));
+            // Network paths make the OS contact a remote-chosen host (NTLM leak).
+            for network in [r"\\server\share\a.png", r"\\?\UNC\server\share\a.png"] {
+                assert!(!local_image_path(Path::new(network)), "{network}");
+            }
+            assert!(
+                !local_image_path(Path::new(r"\a.png")),
+                "drive-relative root"
+            );
+        }
+    }
+
+    #[test]
+    fn replies_hide_file_errors_and_strip_control_characters() {
+        let error = anyhow::anyhow!("No such file \x1b]52;c;cGF5\x07 (os error 2)");
+        assert_eq!(failure(&error, true), "EINVAL:image file unavailable");
+        let reply = failure(&error, false);
+        assert!(reply.starts_with("EINVAL:") && !reply.chars().any(char::is_control));
+        let long = anyhow::anyhow!("{}", "x".repeat(10_000));
+        assert!(failure(&long, false).len() <= "EINVAL:".len() + 256);
+    }
+
+    #[test]
+    fn missing_and_inaccessible_files_get_the_same_reply() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let paths = [
+            directory.path().join("missing.png"),
+            // A directory exists but is not a regular file.
+            directory.path().to_path_buf(),
+            std::path::PathBuf::from("relative.png"),
+        ];
+        for path in paths {
+            let mut graphics = Graphics {
+                allow_files: true,
+                ..Default::default()
+            };
+            let frame = format!(
+                // A 1×1 RGBA declaration keeps the shared graphics budget small.
+                "a=T,i=9,f=32,s=1,v=1,t=f;{}",
+                STANDARD.encode(path.to_string_lossy().as_bytes())
+            );
+            let decode = graphics
+                .handle(frame.as_bytes(), (0, 0), false, (8., 20.))
+                .decode
+                .expect("file transmission is decoded off the parser thread");
+            assert_eq!(
+                graphics.install(&decode, decode.pixels(), (8., 20.)),
+                Some(reply(9, "EINVAL:image file unavailable")),
+                "{}",
+                path.display()
+            );
+        }
     }
 }

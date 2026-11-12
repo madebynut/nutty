@@ -1,0 +1,25 @@
+Nutty third-party software notices
+==================================
+
+Nutty is licensed under the Apache License 2.0 (see LICENSE). It includes the
+open-source components listed below, each under its own license. The full text
+of every license follows, together with the components it applies to.
+
+Overview
+--------
+{{#each overview}}
+{{{name}}} ({{{count}}})
+{{/each}}
+
+{{#each licenses}}
+--------------------------------------------------------------------------------
+{{{name}}} ({{{id}}})
+
+Used by:
+{{#each used_by}}
+  - {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} <{{{crate.repository}}}>{{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

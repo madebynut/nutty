@@ -293,24 +293,24 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let levels = self
-            .panes
-            .get(&id)
-            .and_then(|pane| {
-                let provider = pane.assistant.provider.read(cx).selected_value()?;
-                let model = pane.assistant.model.read(cx).selected_value()?;
-                self.store
-                    .profile
-                    .ai_providers
-                    .iter()
-                    .find(|candidate| candidate.enabled && candidate.name == provider.as_ref())?
-                    .models
-                    .iter()
-                    .find(|candidate| candidate.id == model.as_ref())
-                    .map(|model| model.reasoning.clone())
-            })
-            .unwrap_or_default();
-        let levels = Reasoning::available(&levels);
+        let levels =
+            self.panes
+                .get(&id)
+                .and_then(|pane| {
+                    let provider = pane.assistant.provider.read(cx).selected_value()?;
+                    let model = pane.assistant.model.read(cx).selected_value()?;
+                    let provider = self.store.profile.ai_providers.iter().find(|candidate| {
+                        candidate.enabled && candidate.name == provider.as_ref()
+                    })?;
+                    provider
+                        .models
+                        .iter()
+                        .any(|candidate| candidate.id == model.as_ref())
+                        .then(|| {
+                            crate::provider_catalog::reasoning_levels(provider.kind, model.as_ref())
+                        })
+                })
+                .unwrap_or_else(|| vec![Reasoning::Auto]);
         let items: Vec<SharedString> = levels
             .iter()
             .map(|level| SharedString::from(level.display_label()))
@@ -1376,18 +1376,10 @@ impl WorkspaceView {
         if self.assistant_locked(id, cx) {
             return;
         }
-        let valid = self
-            .pane_selection(id, cx)
-            .ok()
-            .and_then(|selection| {
-                selection
-                    .provider
-                    .models
-                    .iter()
-                    .find(|model| model.id == selection.model)
-                    .map(|model| Reasoning::available(&model.reasoning).contains(&level))
-            })
-            .unwrap_or(false);
+        let valid = self.pane_selection(id, cx).ok().is_some_and(|selection| {
+            crate::provider_catalog::reasoning_levels(selection.provider.kind, &selection.model)
+                .contains(&level)
+        });
         if !valid {
             return;
         }

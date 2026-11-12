@@ -2,7 +2,15 @@
 fn main() {
     println!("cargo:rerun-if-changed=assets/Info.plist");
     println!("cargo:rerun-if-changed=assets/Nutty.ico");
-    let version = std::env::var("CARGO_PKG_VERSION").expect("Cargo supplies the package version");
+    // macOS bundle versions must be plain numbers, so Info.plist carries the numeric
+    // part of a pre-release such as 1.0.0-beta.1; the full version stays in `--version`.
+    let part = |name: &str| std::env::var(name).expect("Cargo supplies the package version");
+    let version = format!(
+        "{}.{}.{}",
+        part("CARGO_PKG_VERSION_MAJOR"),
+        part("CARGO_PKG_VERSION_MINOR"),
+        part("CARGO_PKG_VERSION_PATCH")
+    );
     let plist = std::fs::read_to_string("assets/Info.plist").expect("read application plist");
     assert!(
         plist.contains(&format!(

@@ -1,6 +1,7 @@
 // Render the vector source at each native icon size; no font or screen-scale dependency.
 // Usage: swift scripts/generate-icon.swift [output-directory]
 import AppKit
+import SwiftUI
 
 enum IconError: Error {
     case invalidSource, bitmap, encoding, iconutil(Int32)
@@ -19,7 +20,18 @@ let iconset = temporary.appendingPathComponent("Nutty.iconset", isDirectory: tru
 try files.createDirectory(at: iconset, withIntermediateDirectories: true)
 defer { try? files.removeItem(at: temporary) }
 
-func png(size: Int) throws -> Data {
+// The SVG artwork spans 896 of 1024 units (64-unit margin), which suits Windows, Linux
+// and in-app use. macOS Dock icons follow Apple's grid: an 824-unit body with a
+// 100-unit margin. The .icns therefore draws the same artwork scaled into that body,
+// so Nutty matches the size of neighbouring Dock icons.
+let macScale = 824.0 / 896.0
+let macOrigin = (100.0 - 64.0 * macScale) / 1024.0
+// Apple's macOS icon body has continuous ("squircle") corners with a radius of
+// 185.4 of 824 units. The artwork's own circular corners are smaller, so cutting
+// the body to that shape replaces them and keeps the glyph untouched.
+let macCornerRatio = 185.4 / 824.0
+
+func png(size: Int, mac: Bool = false) throws -> Data {
     guard let bitmap = NSBitmapImageRep(
         bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size,
         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
@@ -30,7 +42,32 @@ func png(size: Int) throws -> Data {
     NSGraphicsContext.current = context
     context.imageInterpolation = .high
     context.shouldAntialias = true
-    vector.draw(in: NSRect(x: 0, y: 0, width: size, height: size), from: .zero, operation: .copy, fraction: 1)
+    let side = Double(size)
+    let rect = mac
+        ? NSRect(x: side * macOrigin, y: side * macOrigin, width: side * macScale, height: side * macScale)
+        : NSRect(x: 0, y: 0, width: side, height: side)
+    NSColor.clear.setFill()
+    NSRect(x: 0, y: 0, width: side, height: side).fill()
+    vector.draw(in: rect, from: .zero, operation: .copy, fraction: 1)
+    if mac {
+        // NSImage's SVG drawing does not honour a clip, so clear what lies outside
+        // the body afterwards (even-odd fill of the canvas minus the body shape).
+        // The body is the 824-unit square at a 100-unit margin, inside `rect`.
+        let bodyRect = CGRect(
+            x: side * 100 / 1024, y: side * 100 / 1024,
+            width: side * 824 / 1024, height: side * 824 / 1024
+        )
+        let body = RoundedRectangle(cornerRadius: bodyRect.width * macCornerRatio, style: .continuous)
+            .path(in: bodyRect)
+            .cgPath
+        let cg = context.cgContext
+        cg.saveGState()
+        cg.setBlendMode(.clear)
+        cg.addRect(CGRect(x: 0, y: 0, width: side, height: side))
+        cg.addPath(body)
+        cg.fillPath(using: .evenOdd)
+        cg.restoreGState()
+    }
     context.flushGraphics()
     guard let data = bitmap.representation(using: .png, properties: [:]) else { throw IconError.encoding }
     return data
@@ -39,8 +76,9 @@ func png(size: Int) throws -> Data {
 for points in [16, 32, 128, 256, 512] {
     for scale in [1, 2] {
         let suffix = scale == 1 ? "" : "@2x"
+        try png(size: points * scale, mac: true)
+            .write(to: iconset.appendingPathComponent("icon_\(points)x\(points)\(suffix).png"))
         let data = try png(size: points * scale)
-        try data.write(to: iconset.appendingPathComponent("icon_\(points)x\(points)\(suffix).png"))
         if points == 512 && scale == 2 {
             try data.write(to: output.appendingPathComponent("Nutty.png"), options: .atomic)
         }

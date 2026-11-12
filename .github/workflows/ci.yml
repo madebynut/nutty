@@ -46,11 +46,64 @@ jobs:
         env:
           RUSTDOCFLAGS: '-D warnings'
         run: cargo doc --workspace --locked --no-deps
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-about
       - name: Package Linux
         run: sh scripts/bundle-linux.sh release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Nutty-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # Same policy as the release gate (deny.toml): a new advisory, license or source
+  # problem is reported on the change that introduces it, not at tag time.
+  dependencies:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny --workspace --all-features check
+
+  # Windows-only code (ConPTY, Job Objects, named pipes, Credential Manager, path
+  # rules) is otherwise first compiled and tested when a release tag is pushed.
+  windows:
+    name: windows-x86_64
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Isolate test configuration
+        shell: bash
+        run: echo "NUTTY_DATA_DIR=$RUNNER_TEMP/nutty-test-config" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: windows-x86_64
+          cache-on-failure: true
+      - run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --locked --all-targets --all-features
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-about
+      - name: Package Windows
+        shell: pwsh
+        run: ./scripts/bundle-windows.ps1 release
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Nutty-windows-x86_64
           path: dist/*
           if-no-files-found: error
           retention-days: 7

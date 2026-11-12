@@ -19,6 +19,8 @@ struct Notice {
     id: Uuid,
     message: String,
     closing: bool,
+    /// Informational notices use neutral styling instead of the success check.
+    info: bool,
 }
 
 #[derive(Default)]
@@ -28,11 +30,16 @@ pub(super) struct SuccessNotification {
 
 impl SuccessNotification {
     fn show(&mut self, message: String) -> Uuid {
+        self.show_kind(message, false)
+    }
+
+    fn show_kind(&mut self, message: String, info: bool) -> Uuid {
         let id = Uuid::new_v4();
         self.notice = Some(Notice {
             id,
             message,
             closing: false,
+            info,
         });
         id
     }
@@ -61,6 +68,18 @@ impl WorkspaceView {
     pub(super) fn notify_success(&mut self, message: &str, cx: &mut Context<Self>) {
         self.status = None;
         let id = self.success_notification.show(message.to_owned());
+        self.expire_notice(id, cx);
+    }
+
+    /// Shows a neutral notice without clearing a visible error status.
+    pub(super) fn notify(&mut self, message: &str, cx: &mut Context<Self>) {
+        let id = self
+            .success_notification
+            .show_kind(message.to_owned(), true);
+        self.expire_notice(id, cx);
+    }
+
+    fn expire_notice(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self._success_notification_timer = Some(cx.spawn(async move |view, cx| {
             cx.background_executor().timer(VISIBLE_DURATION).await;
             let closing = view.update(cx, |view, cx| {
@@ -92,6 +111,11 @@ impl WorkspaceView {
         let p = self.palette();
         let id = notice.id;
         let closing = notice.closing;
+        let (color, icon) = if notice.info {
+            (p.accent, IconName::Copy)
+        } else {
+            (p.success, IconName::Check)
+        };
         let width = (f32::from(window.viewport_size().width) - 32.).clamp(1., 360.);
         Some(
             div()
@@ -106,11 +130,11 @@ impl WorkspaceView {
                 .py_2()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(p.success))
+                .border_color(rgb(color))
                 .bg(rgb(p.surface))
-                .text_color(rgb(p.success))
+                .text_color(rgb(color))
                 .text_size(px(13.))
-                .child(Icon::new(IconName::Check).size_4().flex_shrink_0())
+                .child(Icon::new(icon).size_4().flex_shrink_0())
                 .child(div().flex_1().min_w_0().child(notice.message.clone()))
                 .child(
                     icon_button(

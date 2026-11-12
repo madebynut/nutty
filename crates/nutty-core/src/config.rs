@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     fmt, fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, OnceLock},
 };
 
@@ -50,6 +50,32 @@ pub struct TerminalOptions {
     pub scroll_speed: f32,
     pub copy_on_select: bool,
     pub option_as_alt: bool,
+    /// How programs in a pane may write the system clipboard (OSC 52).
+    pub clipboard_write: ClipboardWrite,
+}
+
+/// Policy for clipboard writes requested by terminal output. Reads always ask.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ClipboardWrite {
+    /// Each write waits for confirmation with a preview of the text.
+    Ask,
+    /// Writes apply immediately and show a notice, so a planted paste is visible.
+    #[default]
+    Notify,
+    /// Writes apply silently, as in earlier versions.
+    Allow,
+}
+
+impl ClipboardWrite {
+    pub const ALL: [Self; 3] = [Self::Ask, Self::Notify, Self::Allow];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ask => crate::i18n::text("每次询问"),
+            Self::Notify => crate::i18n::text("允许并通知"),
+            Self::Allow => crate::i18n::text("始终允许"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -103,6 +129,7 @@ impl Default for TerminalOptions {
             scroll_speed: 1.,
             copy_on_select: false,
             option_as_alt: true,
+            clipboard_write: ClipboardWrite::default(),
         }
     }
 }
@@ -131,6 +158,8 @@ pub struct Preferences {
     pub record_history: bool,
     pub record_sessions: bool,
     pub restore_workspace: bool,
+    /// Ask GitHub once per launch whether a newer release exists (see `update`).
+    pub check_updates: bool,
     /// Per-transfer limit in KiB/s; zero means unlimited.
     pub transfer_limit_kib: u64,
     pub transfer_concurrency: usize,
@@ -151,8 +180,11 @@ impl Default for Preferences {
             agent_font_size: 12.,
             terminal: TerminalOptions::default(),
             scrollback: 10_000,
+            // MSYS and Git Bash export POSIX paths such as /usr/bin/bash on Windows,
+            // which native process creation cannot start.
             shell: std::env::var_os("SHELL")
                 .map(PathBuf::from)
+                .filter(|path| !cfg!(windows) || (path.is_absolute() && path.is_file()))
                 .unwrap_or_else(|| {
                     if cfg!(windows) {
                         PathBuf::from("powershell.exe")
@@ -168,6 +200,7 @@ impl Default for Preferences {
             record_history: false,
             record_sessions: false,
             restore_workspace: true,
+            check_updates: true,
             transfer_limit_kib: 0,
             transfer_concurrency: 2,
         }
@@ -325,36 +358,105 @@ pub fn data_dir() -> Result<PathBuf> {
         .join("nutty"))
 }
 
+/// Creates a missing directory readable only by the current user on Unix.
+/// Existing directories keep their permissions; `NUTTY_DATA_DIR` may point at one.
+pub fn create_private_dir(directory: &Path) -> std::io::Result<()> {
+    if directory.is_dir() {
+        return Ok(());
+    }
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    // Journals, history, logs and recovery files live here; keep their names private.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(directory)
+}
+
+const MAX_PROFILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Reads, migrates and validates one profile file; a missing file is the default profile.
+fn load_profile(path: &Path) -> Result<Profile> {
+    if let Ok(metadata) = fs::metadata(path) {
+        ensure!(metadata.len() <= MAX_PROFILE_BYTES, "配置文件超过 2 MiB");
+    }
+    let mut profile = match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<Profile>(&bytes).context("reading profile.json")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Profile::default(),
+        Err(error) => return Err(error).context("reading profile.json"),
+    };
+    // Checked before the migration below overwrites the version: saving a newer
+    // profile with this version would drop the fields it does not know.
+    ensure!(profile.schema <= 1, "配置版本高于当前应用支持范围");
+    ensure!(
+        (8. ..=32.).contains(&profile.preferences.font_size),
+        "字体大小必须介于 8 和 32 之间"
+    );
+    if profile.schema == 0 && profile.ai_providers.is_empty() {
+        profile
+            .ai_providers
+            .push(crate::provider::Provider::legacy(&profile.preferences));
+    }
+    profile.schema = 1;
+    profile.validate()?;
+    ensure!(
+        profile.preferences.scrollback <= 100_000,
+        "滚动历史最多为 100000 行"
+    );
+    Ok(profile)
+}
+
+/// Whether a readable profile declares a version newer than this application supports.
+fn newer_schema(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.len() <= MAX_PROFILE_BYTES)
+        && fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| value.get("schema")?.as_u64())
+            .is_some_and(|schema| schema > 1)
+}
+
 impl Store {
+    /// Opens the profile and fails on any damage, leaving every file untouched.
     pub fn open(directory: PathBuf) -> Result<Self> {
-        fs::create_dir_all(&directory).context("creating Nutty data directory")?;
-        let path = directory.join("profile.json");
-        if let Ok(metadata) = fs::metadata(&path) {
-            ensure!(metadata.len() <= 2 * 1024 * 1024, "配置文件超过 2 MiB");
-        }
-        let mut profile = match fs::read(&path) {
-            Ok(bytes) => {
-                serde_json::from_slice::<Profile>(&bytes).context("reading profile.json")?
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Profile::default(),
-            Err(error) => return Err(error).context("reading profile.json"),
-        };
-        ensure!(
-            (8. ..=32.).contains(&profile.preferences.font_size),
-            "字体大小必须介于 8 和 32 之间"
-        );
-        if profile.schema == 0 && profile.ai_providers.is_empty() {
-            profile
-                .ai_providers
-                .push(crate::provider::Provider::legacy(&profile.preferences));
-        }
-        profile.schema = 1;
-        profile.validate()?;
-        ensure!(
-            profile.preferences.scrollback <= 100_000,
-            "滚动历史最多为 100000 行"
-        );
+        create_private_dir(&directory).context("creating Nutty data directory")?;
+        let profile = load_profile(&directory.join("profile.json"))?;
         Ok(Self { profile, directory })
+    }
+
+    /// Opens the profile for application startup. When `profile.json` cannot be parsed
+    /// or validated, the last saved snapshot (`profile.previous.json`) is loaded instead
+    /// and the damaged file is kept as `profile-corrupt-<id>.json`. The returned notice
+    /// tells the user. I/O errors and profiles written by a newer version never fall back,
+    /// so nothing is downgraded silently.
+    pub fn open_recovering(directory: PathBuf) -> Result<(Self, Option<String>)> {
+        let error = match Self::open(directory.clone()) {
+            Ok(store) => return Ok((store, None)),
+            Err(error) => error,
+        };
+        let path = directory.join("profile.json");
+        let previous = directory.join("profile.previous.json");
+        if error.downcast_ref::<std::io::Error>().is_some()
+            || newer_schema(&path)
+            || !previous.is_file()
+        {
+            return Err(error);
+        }
+        let Ok(profile) = load_profile(&previous) else {
+            return Err(error);
+        };
+        let preserved = format!("profile-corrupt-{}.json", Uuid::new_v4());
+        fs::rename(&path, directory.join(&preserved))
+            .with_context(|| format!("{error:#}；无法保留损坏的配置文件"))?;
+        tracing::warn!(error = format!("{error:#}"), %preserved, "profile.json was damaged; restored the previous profile");
+        Ok((
+            Self { profile, directory },
+            Some(crate::i18n::localize(format!(
+                "配置文件无法读取，已恢复上一份配置；原文件已保留为 {preserved}"
+            ))),
+        ))
     }
 
     pub fn save(&self) -> Result<()> {
@@ -396,6 +498,10 @@ impl Store {
                 Err(error) => return Err(error.into()),
             }
             fs::rename(&temporary, target)?;
+            // Persist the rename itself so a power loss cannot resurrect the old profile.
+            // The new profile is already in place, so a failure here is not a save failure.
+            #[cfg(unix)]
+            let _ = fs::File::open(&self.directory).and_then(|directory| directory.sync_all());
             Ok(())
         })();
         if result.is_err() {
@@ -574,7 +680,7 @@ impl Profile {
 pub fn secret(name: &str) -> Result<Zeroizing<String>> {
     cached_secret(secret_cache(), name, || {
         Ok(Zeroizing::new(
-            keyring::Entry::new("app.nutty", name)
+            keychain_entry(name)
                 .and_then(|entry| entry.get_password())
                 .map_err(CredentialError::from)?,
         ))
@@ -784,8 +890,70 @@ pub fn use_session_secret(name: &str, value: &str) -> Result<()> {
 }
 /// Allow another storage attempt only after an explicit user recovery action.
 pub fn retry_secret_access() {
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    secret_service::allow_retry();
     if let Ok(mut cache) = secret_cache().lock() {
         cache.retry();
+    }
+}
+
+/// The keychain entry for one Nutty account.
+///
+/// macOS and Windows use `keyring::Entry`. With the Secret Service (Linux and BSD),
+/// `keyring` caches its first store initialisation for the whole process, so a keyring
+/// daemon that starts after Nutty (for example from login autostart) stayed unusable
+/// until restart. Nutty opens that store itself and opens it again after an explicit
+/// retry from the user.
+fn keychain_entry(name: &str) -> keyring::Result<keyring_core::Entry> {
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    {
+        secret_service::ensure_store()?;
+        keyring_core::Entry::new("app.nutty", name)
+    }
+    #[cfg(not(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    )))]
+    keyring::Entry::new("app.nutty", name).map(|entry| entry.inner)
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+))]
+mod secret_service {
+    use std::sync::Mutex;
+
+    /// Whether opening the store was already attempted since the last explicit retry.
+    static ATTEMPTED: Mutex<bool> = Mutex::new(false);
+
+    /// Opens the Secret Service store once per retry; D-Bus is not contacted again
+    /// after a failure until the user asks to retry.
+    pub(super) fn ensure_store() -> keyring::Result<()> {
+        let mut attempted = ATTEMPTED
+            .lock()
+            .map_err(|_| keyring::Error::NoDefaultStore)?;
+        if keyring_core::get_default_store().is_some() {
+            return Ok(());
+        }
+        if *attempted {
+            return Err(keyring::Error::NoDefaultStore);
+        }
+        *attempted = true;
+        keyring_core::set_default_store(zbus_secret_service_keyring_store::Store::new()?);
+        Ok(())
+    }
+
+    pub(super) fn allow_retry() {
+        if let Ok(mut attempted) = ATTEMPTED.lock() {
+            *attempted = false;
+        }
     }
 }
 pub fn clear_secret_cache() {
@@ -794,7 +962,7 @@ pub fn clear_secret_cache() {
     }
 }
 pub fn optional_secret(name: &str) -> Result<Option<Zeroizing<String>>> {
-    match keyring::Entry::new("app.nutty", name)?.get_password() {
+    match keychain_entry(name)?.get_password() {
         Ok(value) => Ok(Some(Zeroizing::new(value))),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(CredentialError::from(error).into()),
@@ -802,7 +970,7 @@ pub fn optional_secret(name: &str) -> Result<Option<Zeroizing<String>>> {
 }
 
 pub fn save_secret(name: &str, value: &str) -> Result<()> {
-    keyring::Entry::new("app.nutty", name)
+    keychain_entry(name)
         .and_then(|entry| entry.set_password(value))
         .map_err(CredentialError::from)?;
     Ok(())
@@ -822,7 +990,7 @@ impl Credentials for Keychain {
         save_secret(name, value)
     }
     fn remove(&mut self, name: &str) -> Result<()> {
-        match keyring::Entry::new("app.nutty", name)?.delete_credential() {
+        match keychain_entry(name)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(error.into()),
         }
@@ -1337,6 +1505,7 @@ mod tests {
             scroll_speed: 2.,
             copy_on_select: true,
             option_as_alt: false,
+            clipboard_write: ClipboardWrite::Ask,
         };
         profile.validate()?;
         let original = serde_json::to_value(&profile)?;
@@ -1522,6 +1691,102 @@ mod tests {
             Store::open(directory.path().to_path_buf()).is_err(),
             "corrupt configuration must remain visible"
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    fn corrupt_names(directory: &Path) -> Result<Vec<String>> {
+        Ok(fs::read_dir(directory)?
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.starts_with("profile-corrupt-"))
+            .collect())
+    }
+
+    #[test]
+    fn damaged_profile_restores_the_previous_snapshot_and_keeps_the_original() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        let mut store = Store::open(root.clone())?;
+        store.profile.preferences.font_size = 17.;
+        store.save()?;
+        store.profile.preferences.font_size = 19.;
+        store.save()?;
+        fs::write(root.join("profile.json"), b"{broken")?;
+        assert!(
+            Store::open(root.clone()).is_err(),
+            "strict open still fails"
+        );
+
+        let (recovered, notice) = Store::open_recovering(root.clone())?;
+        assert_eq!(recovered.profile.preferences.font_size, 17.);
+        let kept = corrupt_names(&root)?;
+        assert_eq!(kept.len(), 1);
+        assert!(notice.is_some_and(|text| text.contains(&kept[0])));
+        assert_eq!(fs::read(root.join(&kept[0]))?, b"{broken");
+        assert!(!root.join("profile.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_never_downgrades_or_hides_unrecoverable_damage() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        let store = Store::open(root.clone())?;
+        store.save()?;
+        store.save()?;
+        // A profile from a newer version must not be replaced by an older snapshot.
+        let newer = br#"{"schema":2}"#;
+        fs::write(root.join("profile.json"), newer)?;
+        assert!(
+            Store::open(root.clone()).is_err(),
+            "newer schema is rejected"
+        );
+        assert!(Store::open_recovering(root.clone()).is_err());
+        assert_eq!(fs::read(root.join("profile.json"))?, newer);
+        // Without a usable snapshot the error is reported and nothing is renamed.
+        fs::write(root.join("profile.json"), b"{broken")?;
+        fs::write(root.join("profile.previous.json"), b"also broken")?;
+        assert!(Store::open_recovering(root.clone()).is_err());
+        assert!(corrupt_names(&root)?.is_empty());
+        // A healthy start carries no notice.
+        let fresh = tempfile::tempdir()?;
+        assert!(
+            Store::open_recovering(fresh.path().to_path_buf())?
+                .1
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_data_directories_are_private() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("nested").join("nutty");
+        Store::open(root.clone())?;
+        assert_eq!(fs::metadata(&root)?.permissions().mode() & 0o777, 0o700);
+        Ok(())
+    }
+
+    #[test]
+    fn clipboard_writes_notify_by_default_and_saved_choices_persist() -> Result<()> {
+        let legacy: TerminalOptions =
+            serde_json::from_value(serde_json::json!({"line_height": 1.4}))?;
+        assert_eq!(legacy.clipboard_write, ClipboardWrite::Notify);
+        for policy in ClipboardWrite::ALL {
+            let options = TerminalOptions {
+                clipboard_write: policy,
+                ..Default::default()
+            };
+            let restored: TerminalOptions =
+                serde_json::from_value(serde_json::to_value(&options)?)?;
+            assert_eq!(restored.clipboard_write, policy);
+        }
         Ok(())
     }
 }

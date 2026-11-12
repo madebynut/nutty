@@ -5,6 +5,7 @@ mod app;
 mod benchmark;
 mod branding;
 mod controls;
+mod diagnostics;
 mod fonts;
 mod menus;
 mod terminal_view;
@@ -12,7 +13,7 @@ mod terminal_view;
 use nutty_ai::{acp, ai, assistant_session, integrations, provider_catalog};
 use nutty_core::{
     agent_discovery, command, config, i18n, network, portable, provider, shells, ssh_options,
-    theme, workspace,
+    theme, update, workspace,
 };
 use nutty_ssh::{remote, sftp_edit, ssh_agent, transfers};
 use nutty_terminal::{journal, terminal};
@@ -65,12 +66,33 @@ fn main() -> anyhow::Result<()> {
         arguments.is_empty(),
         "unsupported argument; use --help for usage"
     );
-    branding::prepare_launch()?;
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-    let runtime = std::sync::Arc::new(tokio::runtime::Runtime::new()?);
-    let settings = config::Store::open(config::data_dir()?)?;
+    // On macOS a direct launch re-executes itself inside a runtime bundle (same PID).
+    // That must happen before logging starts, or the startup line is written twice.
+    let launch = branding::prepare_launch();
+    let data = config::data_dir();
+    if let Ok(directory) = &data {
+        diagnostics::init_logging(directory);
+    }
+    diagnostics::install_panic_hook();
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        "Nutty starting"
+    );
+    let started = (|| -> anyhow::Result<_> {
+        launch?;
+        let runtime = std::sync::Arc::new(tokio::runtime::Runtime::new()?);
+        let (settings, notice) = config::Store::open_recovering(data?)?;
+        Ok((runtime, (settings, notice)))
+    })();
+    let (runtime, (settings, recovery_notice)) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            diagnostics::report_startup_failure(&error);
+            return Err(error);
+        }
+    };
     gpui_kit::application()
         .with_assets(branding::Assets)
         .run(move |cx| {
@@ -108,6 +130,8 @@ fn main() -> anyhow::Result<()> {
                     cx,
                 ))),
                 window_min_size: Some(size(px(900.), px(560.))),
+                // Wayland compositors match the window to nutty.desktop through this identifier.
+                app_id: Some("nutty".into()),
                 titlebar: Some(gpui_kit::TitlebarOptions {
                     title: Some("Nutty".into()),
                     appears_transparent: true,
@@ -119,6 +143,10 @@ fn main() -> anyhow::Result<()> {
                 cx.new(|cx| app::WorkspaceView::new(settings, runtime, window, cx))
             }) {
                 Ok((handle, workspace)) => {
+                    // Shown after workspace restore so its own notices cannot replace it.
+                    if let Some(notice) = recovery_notice.clone() {
+                        workspace.update(cx, |view, cx| view.show_status(notice, cx));
+                    }
                     // Native menu dispatch also needs a route when no child has focus.
                     macro_rules! route {
                         ($($action:ty),+ $(,)?) => {$({

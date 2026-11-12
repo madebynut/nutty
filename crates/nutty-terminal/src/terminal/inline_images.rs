@@ -4,6 +4,8 @@ use anyhow::{Context as _, Result, bail, ensure};
 use std::collections::HashMap;
 
 const LIMIT: u32 = 4096;
+/// Pixel writes per image: sixteen full-size overdraws, far above what encoders emit.
+const MAX_PAINTED: u64 = 16 * LIMIT as u64 * LIMIT as u64;
 
 fn number(bytes: &[u8], index: &mut usize) -> Result<u32> {
     let start = *index;
@@ -77,6 +79,9 @@ fn walk_sixel(bytes: &[u8], mut visit: impl FnMut(Raster) -> Result<()>) -> Resu
         "Invalid Sixel header"
     );
     let (mut index, mut x, mut y) = (q + 1, 0_u32, 0_u32);
+    // Each run is bounded, but `$` rewinds to column zero, so a hostile frame can
+    // repaint the same band indefinitely. Cap the total work, not only the extent.
+    let mut painted = 0_u64;
     while index < bytes.len() {
         let byte = bytes[index];
         index += 1;
@@ -145,6 +150,8 @@ fn walk_sixel(bytes: &[u8], mut visit: impl FnMut(Raster) -> Result<()>) -> Resu
                         && y + (8 - bits.leading_zeros()).max(1) <= LIMIT,
                     "Sixel repeat exceeds budget"
                 );
+                painted += u64::from(count) * u64::from(bits.count_ones());
+                ensure!(painted <= MAX_PAINTED, "Sixel image exceeds drawing budget");
                 visit(Raster::Paint { x, y, count, bits })?;
                 x += count;
             }
@@ -281,5 +288,40 @@ mod tests {
         assert!(sixel_size(b"q!4294967295~").is_err());
         assert!(sixel_size(b"q\"1;1;100000;100000~").is_err());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    fn overdraw(passes: usize) -> Vec<u8> {
+        let mut frame = b"q\"1;1;4096;6".to_vec();
+        for _ in 0..passes {
+            frame.extend_from_slice(b"!4096~$");
+        }
+        frame
+    }
+
+    #[test]
+    fn repeated_overdraw_is_bounded_without_limiting_real_images() {
+        assert_eq!(sixel_size(&overdraw(16)).ok(), Some((4096, 6)));
+        let started = std::time::Instant::now();
+        // Each pass paints 4096 × 6 pixels; this exceeds 16 full 4096² frames.
+        let hostile = overdraw(12_000);
+        assert!(sixel_size(&hostile).is_err());
+        assert!(sixel_pixels(&hostile).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn only_drawn_pixels_count_against_the_budget() {
+        // '?' carries no set bits, so it moves the cursor without painting.
+        let mut frame = b"q".to_vec();
+        for _ in 0..12_000 {
+            frame.extend_from_slice(b"!4096?$");
+        }
+        frame.extend_from_slice(b"~");
+        assert!(sixel_size(&frame).is_ok());
     }
 }

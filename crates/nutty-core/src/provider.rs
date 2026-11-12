@@ -41,16 +41,14 @@ impl Kind {
         }
     }
 
-    pub fn reasoning_choices(self) -> &'static [Reasoning] {
+    /// The vendor id Rig's model catalog files this provider's models under.
+    pub fn catalog_vendor(self) -> &'static str {
         match self {
-            Self::DeepSeek => &[
-                Reasoning::Auto,
-                Reasoning::Off,
-                Reasoning::Low,
-                Reasoning::High,
-                Reasoning::Max,
-            ],
-            _ => &Reasoning::ALL,
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Gemini => "gcp.gemini",
+            Self::Ollama => "ollama",
+            Self::DeepSeek => "deepseek",
         }
     }
 }
@@ -111,22 +109,37 @@ impl Reasoning {
             .into_iter()
             .find(|level| level.label() == label || level.chinese_label() == label)
     }
-    pub fn available(configured: &[Self]) -> Vec<Self> {
-        let mut levels = vec![Self::Auto];
-        for level in configured {
-            if !levels.contains(level) {
-                levels.push(*level);
-            }
+    /// Every effort level, offered when a model's own levels are not known.
+    pub const FULL: [Self; 7] = [
+        Self::Auto,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+    /// The level's name in Rig's catalog (`off`, `minimal` … `max`); `None` for Auto.
+    pub fn catalog_name(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Off => Some("off"),
+            Self::Minimal => Some("minimal"),
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::XHigh => Some("xhigh"),
+            Self::Max => Some("max"),
         }
-        levels
     }
 }
 
+/// A configured model. Reasoning levels are not stored: they come from Rig's model
+/// catalog when the model is chosen. Profiles that still carry the former
+/// per-model `reasoning` list load unchanged; the field is dropped on the next save.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Model {
     pub id: String,
-    #[serde(default)]
-    pub reasoning: Vec<Reasoning>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -156,12 +169,6 @@ impl Provider {
             endpoint: preferences.ai_endpoint.clone(),
             models: vec![Model {
                 id: preferences.ai_model.clone(),
-                reasoning: vec![
-                    Reasoning::Auto,
-                    Reasoning::Low,
-                    Reasoning::Medium,
-                    Reasoning::High,
-                ],
             }],
             proxy: None,
             enabled: true,
@@ -217,15 +224,12 @@ impl Selection {
     pub fn validate(&self) -> Result<()> {
         self.provider.validate()?;
         ensure!(self.provider.enabled, "提供方已禁用");
-        let model = self
-            .provider
-            .models
-            .iter()
-            .find(|model| model.id == self.model)
-            .ok_or_else(|| anyhow::anyhow!("模型不属于此提供方"))?;
         ensure!(
-            self.reasoning == Reasoning::Auto || model.reasoning.contains(&self.reasoning),
-            "此模型未启用所选推理强度"
+            self.provider
+                .models
+                .iter()
+                .any(|model| model.id == self.model),
+            "模型不属于此提供方"
         );
         Ok(())
     }
@@ -245,15 +249,5 @@ mod tests {
             );
         }
         assert_eq!(Reasoning::from_display_label("unknown"), None);
-        assert_eq!(
-            Reasoning::available(&[
-                Reasoning::High,
-                Reasoning::Auto,
-                Reasoning::High,
-                Reasoning::Off
-            ]),
-            [Reasoning::Auto, Reasoning::High, Reasoning::Off]
-        );
-        assert_eq!(Reasoning::available(&[]), [Reasoning::Auto]);
     }
 }

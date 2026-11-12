@@ -18,20 +18,25 @@ use crate::{
     session_environment::{Environment, Platform},
 };
 
+/// Output tokens for one reply. A thinking budget must stay below the request's
+/// output limit (Anthropic rejects anything else), so budgets get extra room.
+const MAX_OUTPUT_TOKENS: u64 = 16_384;
+
 fn apply_reasoning(
-    reasoning: crate::provider::Reasoning,
+    selection: &Selection,
     request: rig_core::completion::CompletionRequest,
 ) -> rig_core::completion::CompletionRequest {
-    use rig_core::completion::{Effort, Reasoning as Native};
-    match reasoning {
-        crate::provider::Reasoning::Auto => request,
-        crate::provider::Reasoning::Off => request.reasoning(Native::Off),
-        crate::provider::Reasoning::Minimal => request.reasoning(Effort::Minimal),
-        crate::provider::Reasoning::Low => request.reasoning(Effort::Low),
-        crate::provider::Reasoning::Medium => request.reasoning(Effort::Medium),
-        crate::provider::Reasoning::High => request.reasoning(Effort::High),
-        crate::provider::Reasoning::XHigh => request.reasoning(Effort::XHigh),
-        crate::provider::Reasoning::Max => request.reasoning(Effort::Max),
+    use rig_core::completion::Reasoning as Native;
+    match crate::provider_catalog::native_reasoning(
+        selection.provider.kind,
+        &selection.model,
+        selection.reasoning,
+    ) {
+        None => request.max_tokens(MAX_OUTPUT_TOKENS),
+        Some(Native::Budget { tokens }) => request
+            .reasoning(Native::Budget { tokens })
+            .max_tokens(MAX_OUTPUT_TOKENS.max(u64::from(tokens) + 4_096)),
+        Some(native) => request.reasoning(native).max_tokens(MAX_OUTPUT_TOKENS),
     }
 }
 
@@ -246,7 +251,7 @@ async fn complete_selection(
     let request = CompletionRequest::from(messages)
         .tools(bindings.iter().map(|binding| binding.definition.clone()))
         .preamble(operations_guidance(&context.environment)?);
-    let request = apply_reasoning(selection.reasoning, request).max_tokens(16_384);
+    let request = apply_reasoning(&selection, request);
     let http = if let Some(proxy) = &selection.proxy {
         rig_reqwest::ReqwestClient::from(proxy.http_client().await?)
     } else {
@@ -442,7 +447,7 @@ mod tests {
                 let model = match kind { Kind::OpenAi => "gpt-5.2", Kind::DeepSeek => "deepseek-flash", Kind::Anthropic => "claude-sonnet-4-6", Kind::Gemini => "gemini-3.1-pro-preview", Kind::Ollama => "qwen3" };
                 let selection = Selection {
                     provider: Provider { id: uuid::Uuid::new_v4(), name: "fixture".into(), kind, endpoint,
-                        models: vec![crate::provider::Model { id: model.into(), reasoning: vec![Reasoning::Auto, Reasoning::High] }], enabled: true, proxy: None },
+                        models: vec![crate::provider::Model { id: model.into() }], enabled: true, proxy: None },
                     model: model.into(), reasoning: if matches!(kind, Kind::OpenAi | Kind::DeepSeek) { Reasoning::High } else { Reasoning::Auto }, proxy: None,
                 };
                 let context = TerminalContext {

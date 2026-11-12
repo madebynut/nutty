@@ -32,6 +32,8 @@ pub(crate) enum PaneEvent {
     Input(Vec<u8>),
     Paste(String),
     ClipboardPaste,
+    /// Output asked to write the system clipboard (OSC 52); the workspace applies the policy.
+    ClipboardWrite(String),
 }
 
 struct CachedRow {
@@ -163,7 +165,7 @@ impl TerminalView {
                     .update(cx, |view, cx| {
                         view.snapshot = view.terminal.engine.snapshot();
                         if let Some(text) = view.terminal.engine.take_clipboard_copy() {
-                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+                            cx.emit(PaneEvent::ClipboardWrite(text));
                         }
                         if view.terminal.engine.clipboard_paste_pending() {
                             if !view.paste_prompted {

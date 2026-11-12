@@ -17,10 +17,16 @@ Nutty 的 Windows 版本使用原生 GPUI/Direct3D 窗口、ConPTY 和 Windows �
 - ACP/MCP 可发现 PATH、用户 npm、WinGet 和 Node.js 安装目录。npm `.cmd` 启动器使用 Rust 标准库的 Windows 参数处理；ACP 用 Job Object 回收后代进程。第三方 CLI 仍须自行安装和登录。
 - 本地保存路径支持盘符、中文、空格；下载文件名会拒绝 Windows 保留名称及非法字符。创建符号链接取决于 Windows 开发者模式/权限，当前下载保留链接的任务会明确报错，可选择跳过链接。
 - 配置位于 Windows 用户配置目录中的 `nutty` 路径（以应用设置显示为准）；`NUTTY_DATA_DIR` 可指定隔离测试目录。凭据由系统凭据管理器保存，配置文件不包含明文密码。
+- Shell 列表会发现 PowerShell 7、Windows PowerShell、cmd.exe、WSL（`wsl.exe`）以及默认目录下的 Git Bash。
+- 窗口使用 Nutty 绘制的标题栏，支持拖动、双击最大化、贴靠布局以及最小化/最大化/关闭按钮。
+
+## 日志与崩溃报告
+
+Windows 发布版没有控制台窗口，诊断信息写入 `%APPDATA%\nutty\logs\nutty.log`（或 `NUTTY_DATA_DIR\logs`），超过 8 MiB 时在下次启动轮换为 `nutty.log.1`。程序崩溃时同目录生成 `crash-*.log`；启动失败（例如配置文件损坏）会弹出错误对话框并给出日志路径。Nutty 的日志事件不包含密码、密钥或终端内容。
 
 ## 从源码构建
 
-安装 Rust stable（MSRV 见 `Cargo.toml`）、Visual Studio 2022/2026 的“使用 C++ 的桌面开发”和 Windows 10/11 SDK。发布版 GPUI 用 SDK 的 `fxc.exe` 编译着色器，脚本会使用其自动探测；必要时指定 `GPUI_FXC_PATH`。测试需要 Python 3.11+（`python` 在 PATH 中）。
+安装 Rust stable（MSRV 见 `Cargo.toml`）、Visual Studio 2022/2026 的“使用 C++ 的桌面开发”和 Windows 10/11 SDK。发布版 GPUI 用 SDK 的 `fxc.exe` 编译着色器，脚本会使用其自动探测；必要时指定 `GPUI_FXC_PATH`。测试需要 Python 3.11+（`python` 在 PATH 中）。打包需要 cargo-about（`cargo install --locked cargo-about --features cli`），用于生成第三方许可证声明。
 
 ```powershell
 cargo fmt --all --check
@@ -29,4 +35,4 @@ cargo test --workspace --all-targets --all-features --locked
 ./scripts/bundle-windows.ps1 release
 ```
 
-CI 同时验证 ConPTY 输入/输出、PowerShell 目录与命令历史、窗格隔离、协议会话和传输任务。CI 不替代中文输入法、多显示器/DPI、显卡、睡眠恢复和真实服务器的桌面验收。
+每次推送和拉取请求的 CI 都在 Windows Server 2025 上运行 Clippy、全部测试并打包。CI 同时验证 ConPTY 输入/输出、PowerShell 目录与命令历史、窗格隔离、协议会话和传输任务。CI 不替代中文输入法、多显示器/DPI、显卡、睡眠恢复和真实服务器的桌面验收。

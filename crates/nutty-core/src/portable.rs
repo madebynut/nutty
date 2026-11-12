@@ -176,9 +176,10 @@ pub fn load(path: &Path, password: Option<&str>) -> Result<Preview> {
     file.take((MAX_ARCHIVE + HEADER + 17) as u64)
         .read_to_end(&mut bytes)?;
     if bytes.starts_with(MAGIC) {
+        let archive = decrypt(&bytes, password.context("请输入备份密码")?)?;
         Ok(Preview {
-            archive: decrypt(&bytes, password.context("请输入备份密码")?)?,
-            warnings: Vec::new(),
+            warnings: activation_notices(&archive.profile),
+            archive,
         })
     } else {
         let (connections, warnings) = openssh(
@@ -197,6 +198,55 @@ pub fn load(path: &Path, password: Option<&str>) -> Result<Preview> {
             warnings,
         })
     }
+}
+
+/// Replaces the profile with an imported one without letting the file start programs.
+///
+/// MCP servers and agents stay enabled, and forwards keep connecting automatically,
+/// only when an identical enabled record already exists locally. The local shell is
+/// kept because the imported path names a program on another machine.
+pub fn replace(current: &Profile, incoming: &Archive) -> Result<Archive> {
+    let mut profile = incoming.profile.clone();
+    for item in &mut profile.mcp_servers {
+        let trusted = current.mcp_servers.contains(item);
+        item.enabled &= trusted;
+    }
+    for item in &mut profile.agents {
+        let trusted = current.agents.iter().any(|old| {
+            old.id == item.id && old.enabled && old.name == item.name && old.process == item.process
+        });
+        item.enabled &= trusted;
+    }
+    for rule in &mut profile.forwards {
+        let trusted = current.forwards.contains(rule);
+        rule.on_connect &= trusted;
+    }
+    profile.preferences.shell = current.preferences.shell.clone();
+    profile.validate()?;
+    Ok(Archive {
+        profile,
+        secrets: incoming.secrets.clone(),
+    })
+}
+
+/// Lists what importing will deliberately not activate, for the preview.
+pub fn activation_notices(profile: &Profile) -> Vec<String> {
+    let integrations = profile
+        .mcp_servers
+        .iter()
+        .filter(|item| item.enabled)
+        .count()
+        + profile.agents.iter().filter(|item| item.enabled).count();
+    let mut notices = Vec::new();
+    if integrations > 0 {
+        notices.push(format!(
+            "{integrations} 个已启用的 MCP 服务或 Agent 不会随导入启用，请核对程序与参数后在设置中开启"
+        ));
+    }
+    if profile.forwards.iter().any(|rule| rule.on_connect) {
+        notices.push("导入的端口转发不会在连接时自动启动，请确认后重新开启".into());
+    }
+    notices
 }
 
 /// Merges records by stable identity/name, preserving existing records and their credentials.
@@ -256,6 +306,17 @@ pub fn merge(current: &Profile, incoming: &Archive) -> Result<Archive> {
             && let crate::integration_config::McpTransport::Http { proxy, .. } = &mut item.transport
         {
             *proxy = remap(*proxy, &proxy_ids);
+        }
+    }
+    // Imported integrations name local programs; they stay off until reviewed here.
+    for item in &mut result.mcp_servers {
+        if !current.mcp_servers.iter().any(|old| old.id == item.id) {
+            item.enabled = false;
+        }
+    }
+    for item in &mut result.agents {
+        if !current.agents.iter().any(|old| old.id == item.id) {
+            item.enabled = false;
         }
     }
     for root in &incoming.profile.skills_roots {
@@ -1285,6 +1346,184 @@ mod tests {
         assert_eq!(unknown[0].port, 22);
         assert!(warnings.iter().any(|warning| warning.contains("百分号")));
         assert!(warnings.iter().any(|warning| warning.contains("Port")));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod import_activation_tests {
+    use super::*;
+    use crate::integration_config::{Agent, McpServer, McpTransport, Process};
+
+    fn server(name: &str) -> McpServer {
+        McpServer {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            enabled: true,
+            transport: McpTransport::Stdio {
+                process: process("mcp-server"),
+            },
+        }
+    }
+
+    fn process(program: &str) -> Process {
+        Process {
+            program: program.into(),
+            args: vec!["--stdio".into()],
+            directory: std::env::temp_dir(),
+            environment: false,
+        }
+    }
+
+    fn agent(name: &str) -> Agent {
+        Agent {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            enabled: true,
+            process: process("agent"),
+        }
+    }
+
+    fn connection() -> Connection {
+        Connection {
+            kind: crate::config::ConnectionKind::Ssh,
+            initial_directory: ".".into(),
+            id: Uuid::new_v4(),
+            name: "server".into(),
+            group: String::new(),
+            host: "server.example".into(),
+            port: 22,
+            user: "alice".into(),
+            auth: crate::config::Authentication::Agent,
+            jump: None,
+            ssh: Default::default(),
+            proxy: None,
+        }
+    }
+
+    fn forward(connection: Uuid) -> crate::forwarding::Rule {
+        crate::forwarding::Rule {
+            id: Uuid::new_v4(),
+            connection,
+            mode: crate::forwarding::Mode::Dynamic,
+            bind: "127.0.0.1:1080".parse().expect("bind address"),
+            target: None,
+            on_connect: true,
+        }
+    }
+
+    fn archive(profile: Profile) -> Archive {
+        Archive {
+            profile,
+            secrets: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn merged_integrations_stay_off_until_enabled_here() -> Result<()> {
+        let trusted = server("trusted");
+        let mut current = Profile::default();
+        current.mcp_servers.push(trusted.clone());
+        let mut incoming = Profile::default();
+        incoming
+            .mcp_servers
+            .extend([trusted.clone(), server("planted")]);
+        incoming.agents.push(agent("planted agent"));
+        let merged = merge(&current, &archive(incoming))?.profile.clone();
+        let enabled = |name: &str| {
+            merged
+                .mcp_servers
+                .iter()
+                .find(|item| item.name == name)
+                .map(|item| item.enabled)
+        };
+        assert_eq!(
+            enabled("trusted"),
+            Some(true),
+            "existing records keep their state"
+        );
+        assert_eq!(enabled("planted"), Some(false));
+        assert!(merged.agents.iter().all(|item| !item.enabled));
+        Ok(())
+    }
+
+    #[test]
+    fn replacing_keeps_the_local_shell_and_only_trusts_identical_records() -> Result<()> {
+        let ssh = connection();
+        let trusted_server = server("trusted");
+        let trusted_agent = agent("trusted agent");
+        let trusted_forward = forward(ssh.id);
+        let mut current = Profile::default();
+        current.connections.push(ssh.clone());
+        current.mcp_servers.push(trusted_server.clone());
+        current.agents.push(trusted_agent.clone());
+        current.forwards.push(trusted_forward.clone());
+
+        let mut changed_agent = trusted_agent.clone();
+        changed_agent.process.program = "replaced-agent".into();
+        let mut incoming = Profile::default();
+        incoming.preferences.shell = "/tmp/planted-shell".into();
+        incoming.connections.push(ssh.clone());
+        incoming
+            .mcp_servers
+            .extend([trusted_server.clone(), server("planted")]);
+        incoming.agents.push(changed_agent);
+        incoming.forwards.extend([trusted_forward.clone(), {
+            let mut rule = forward(ssh.id);
+            rule.bind = "0.0.0.0:1081".parse().expect("bind address");
+            rule
+        }]);
+
+        let replaced = replace(&current, &archive(incoming))?.profile.clone();
+        assert_eq!(replaced.preferences.shell, current.preferences.shell);
+        let server_enabled = |name: &str| {
+            replaced
+                .mcp_servers
+                .iter()
+                .find(|item| item.name == name)
+                .map(|item| item.enabled)
+        };
+        assert_eq!(server_enabled("trusted"), Some(true));
+        assert_eq!(server_enabled("planted"), Some(false));
+        assert!(
+            !replaced.agents[0].enabled,
+            "a changed program is not trusted"
+        );
+        let on_connect = |id: Uuid| {
+            replaced
+                .forwards
+                .iter()
+                .find(|rule| rule.id == id)
+                .map(|rule| rule.on_connect)
+        };
+        assert_eq!(on_connect(trusted_forward.id), Some(true));
+        assert!(
+            replaced
+                .forwards
+                .iter()
+                .filter(|rule| !rule.on_connect)
+                .count()
+                == 1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_previews_report_what_will_not_be_activated() -> Result<()> {
+        let ssh = connection();
+        let mut profile = Profile::default();
+        profile.connections.push(ssh.clone());
+        profile.mcp_servers.push(server("planted"));
+        profile.agents.push(agent("planted agent"));
+        profile.forwards.push(forward(ssh.id));
+        let notices = activation_notices(&profile);
+        assert_eq!(notices.len(), 2);
+        assert!(notices[0].starts_with("2 "));
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("backup.nutty");
+        write_new(&path, &encrypt(&archive(profile), "correct horse")?)?;
+        assert_eq!(load(&path, Some("correct horse"))?.warnings, notices);
+        assert!(activation_notices(&Profile::default()).is_empty());
         Ok(())
     }
 }

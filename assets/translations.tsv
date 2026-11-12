@@ -980,3 +980,29 @@ SSH 连接成功后自动启动	Start when the SSH connection succeeds
 转发目标无效	Invalid forwarding destination
 转发模式与目标不匹配	Forwarding mode and destination do not match
 远程转发建立超时	Remote forwarding startup timed out
+主机名包含 known_hosts 不支持的字符，无法记录服务器身份	The host name contains characters that known_hosts cannot store, so the server identity cannot be recorded
+Zmodem 文件名在 Windows 上无效	Zmodem file name is not valid on Windows
+{} 个已启用的 MCP 服务或 Agent 不会随导入启用，请核对程序与参数后在设置中开启	{} enabled MCP servers or agents stay off after import. Review their programs and arguments, then turn them on in Settings
+导入的端口转发不会在连接时自动启动，请确认后重新开启	Imported port forwards will not start on connect. Review them, then turn this back on
+每次询问	Ask every time
+允许并通知	Allow and notify
+始终允许	Always allow
+终端程序写入剪贴板	Terminal programs writing the clipboard
+OSC 52 写入，常见于远端 tmux、vim；读取剪贴板始终询问	OSC 52 writes, common with remote tmux and vim. Clipboard reads always ask
+终端程序请求写入剪贴板	A terminal program wants to write the clipboard
+粘贴前请核对内容，尤其是多行命令。拒绝不会改动剪贴板。	Check the content before pasting, especially multi-line commands. Denying leaves the clipboard unchanged.
+共 {} 个字符，{} 行	{} characters, {} lines
+写入剪贴板	Write to clipboard
+终端程序已写入剪贴板（{} 个字符）	A terminal program wrote to the clipboard ({} characters)
+监听地址不是 127.0.0.1：同一网络中的任何人都可以不经认证使用此 SOCKS5 代理进入远端网络。仅在可信网络中使用，并配合防火墙限制来源。	This listener is not on 127.0.0.1: anyone on the same network can use this SOCKS5 proxy without authentication to reach the remote network. Use it only on trusted networks and restrict sources with a firewall.
+监听地址不是 127.0.0.1：同一网络中的其他设备也能通过本机访问转发目标。仅在可信网络中使用。	This listener is not on 127.0.0.1: other devices on the same network can reach the forwarding target through this computer. Use it only on trusted networks.
+远端监听地址不是 127.0.0.1：服务器允许 GatewayPorts 时，远端网络中的设备可以访问本机的转发目标。	The remote listener is not on 127.0.0.1: if the server allows GatewayPorts, devices on the remote network can reach this computer's forwarding target.
+此监听地址对其他设备开放：本地转发会让同一网络中的设备访问目标，SOCKS5 将成为无需认证的代理。只想本机使用时请填写 127.0.0.1。	This address is reachable from other devices: a local forward lets devices on the same network reach the target, and SOCKS5 becomes an unauthenticated proxy. Use 127.0.0.1 to keep it on this computer.
+配置文件无法读取，已恢复上一份配置；原文件已保留为 {}	The configuration file could not be read, so the previous configuration was restored. The original file was kept as {}
+此 API 地址使用 http 且不在本机：对话内容和 API 密钥都会明文传输，可能被网络中的设备截获。请尽量改用 https。	This API address uses http and is not on this computer: conversations and the API key are sent unencrypted and can be intercepted on the network. Use https where possible.
+此地址使用 http 且不在本机：工具调用内容和 Bearer Token 都会明文传输，可能被网络中的设备截获。请尽量改用 https。	This address uses http and is not on this computer: tool calls and the bearer token are sent unencrypted and can be intercepted on the network. Use https where possible.
+新版本 {} 可用	Nutty {} is available
+本次不再提示	Hide until next launch
+查看新版本 {}	View Nutty {}
+检查新版本	Check for updates
+启动时向 GitHub 查询一次是否有新版本，不发送任何个人信息	Ask GitHub once at startup whether a newer release exists. No personal information is sent

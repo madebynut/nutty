@@ -54,6 +54,9 @@ jobs:
         with:
           key: ${{ matrix.platform }}
           cache-on-failure: true
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-about
       - name: Check package and tag versions
         run: python scripts/check-version.py
       - run: cargo fmt --all --check
@@ -96,25 +99,22 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-deny
-      - name: Audit all shipped targets
+      # deny.toml lists the shipped targets and every reviewed exemption. This checks
+      # advisories, licenses, banned crates and dependency sources.
+      - name: Check dependency policy for all shipped targets
         id: audit
         continue-on-error: true
-        run: |
-          failed=0
-          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
-            cargo deny --workspace --all-features --format json --target "$target" check advisories > "advisories-$target.jsonl" 2>&1 || failed=1
-          done
-          exit "$failed"
+        run: cargo deny --workspace --all-features --format json check > dependency-check.jsonl 2>&1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: dependency-advisories
-          path: advisories-*.jsonl
+          path: dependency-check.jsonl
       - name: Report findings and block stable releases
         if: steps.audit.outcome != 'success'
         run: |
-          echo '::warning::Dependency audit did not pass. Read the dependency-advisories artifact; this build is not approved for production.'
-          echo 'Dependency audit did not pass. Preview artifacts are for testing only; stable tags are blocked.' >> "$GITHUB_STEP_SUMMARY"
+          echo '::warning::Dependency policy (deny.toml) did not pass. Read the dependency-advisories artifact.'
+          echo 'Dependency policy did not pass. Pre-releases continue with this warning; stable tags are blocked.' >> "$GITHUB_STEP_SUMMARY"
           case "$NUTTY_RELEASE_TAG" in *-*) ;; *) exit 1 ;; esac
 
   release:
@@ -125,6 +125,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: Nutty-*
@@ -135,19 +136,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # Notes come from this version's CHANGELOG section plus install instructions.
+          python3 scripts/release-notes.py > release-notes.md
           cd dist
           sha256sum ./*.zip ./*.tar.gz > SHA256SUMS.txt
-          cat > release-notes.md <<'NOTES'
-          Nutty for macOS (Apple Silicon / Intel), Windows x86_64, and Linux x86_64.
-
-          Download the archive for your platform and verify it against SHA256SUMS.txt.
-          macOS builds use an ad-hoc development signature; Windows and Linux builds are unsigned.
-          These artifacts are for validation, not an enterprise production approval.
-          Review the build checks and dependency-advisories artifact before deployment.
-          正式分发仍需签名、公证、依赖门禁与真实桌面环境验收。临时版本请勿用于生产环境。
-          NOTES
           if [[ "$NUTTY_RELEASE_TAG" == *-* ]]; then
-            gh release create "$NUTTY_RELEASE_TAG" ./*.zip ./*.tar.gz SHA256SUMS.txt --verify-tag --title "Nutty $NUTTY_RELEASE_TAG · Preview" --notes-file release-notes.md --prerelease --latest=false
+            gh release create "$NUTTY_RELEASE_TAG" ./*.zip ./*.tar.gz SHA256SUMS.txt --verify-tag --title "Nutty $NUTTY_RELEASE_TAG · 预发布" --notes-file ../release-notes.md --prerelease --latest=false
           else
-            gh release create "$NUTTY_RELEASE_TAG" ./*.zip ./*.tar.gz SHA256SUMS.txt --verify-tag --title "Nutty $NUTTY_RELEASE_TAG" --notes-file release-notes.md --draft --latest=false
+            # Stable tags stay a draft until the maintainer reviews and publishes them.
+            gh release create "$NUTTY_RELEASE_TAG" ./*.zip ./*.tar.gz SHA256SUMS.txt --verify-tag --title "Nutty $NUTTY_RELEASE_TAG" --notes-file ../release-notes.md --draft
           fi

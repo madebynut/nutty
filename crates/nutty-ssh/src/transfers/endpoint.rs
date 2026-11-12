@@ -653,18 +653,27 @@ pub(super) fn valid_name(name: &str) -> Result<()> {
     );
     #[cfg(windows)]
     {
+        // Windows ignores trailing spaces before the extension when matching devices.
         let stem = name
             .split('.')
             .next()
             .unwrap_or_default()
+            .trim_end_matches(' ')
             .to_ascii_uppercase();
+        let numbered_device = (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.chars().count() == 4
+            && stem
+                .chars()
+                .nth(3)
+                .is_some_and(|digit| ('1'..='9').contains(&digit) || "¹²³".contains(digit));
         ensure!(
             !name.contains([':', '*', '?', '"', '<', '>', '|'])
                 && !name.ends_with(['.', ' '])
-                && !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-                && !(stem.len() == 4
-                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
-                    && matches!(stem.as_bytes()[3], b'1'..=b'9')),
+                && !matches!(
+                    stem.as_str(),
+                    "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+                )
+                && !numbered_device,
             "文件名称无法在 Windows 上安全保存"
         );
     }

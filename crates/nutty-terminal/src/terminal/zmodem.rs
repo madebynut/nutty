@@ -15,7 +15,11 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zmodem2::{Action, Event, FileInfo, Position};
 
-const QUEUE: usize = 64;
+/// Chunks (at most 16 KiB each, so at most 32 MiB) buffered between the terminal reader
+/// and the transfer thread. The reader must not block while holding the terminal lock,
+/// so this slack absorbs disk stalls (fsync, antivirus scans, network drives) that
+/// previously aborted fast transfers once 1 MiB was queued.
+const QUEUE: usize = 2048;
 const MAX_FILE: u64 = u32::MAX as u64;
 const MAX_FILES: usize = 128;
 const ABORT: &[u8] =
@@ -407,8 +411,58 @@ fn safe_name(bytes: &[u8]) -> Result<&str> {
     );
     Ok(name)
 }
+/// Remote-chosen names must stay one plain component in the chosen directory.
+/// Control and bidirectional characters would disguise the name in the status UI;
+/// on Windows `:` selects a drive or alternate data stream and device names open devices.
+fn incoming_name(bytes: &[u8]) -> Result<&str> {
+    let name = safe_name(bytes)?;
+    ensure!(
+        !name.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+                )
+        }),
+        "Zmodem 文件名无效"
+    );
+    #[cfg(windows)]
+    {
+        let stem = name
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(' ')
+            .to_ascii_uppercase();
+        let device = matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.chars().count() == 4
+            && stem
+                .chars()
+                .nth(3)
+                .is_some_and(|digit| ('1'..='9').contains(&digit) || "¹²³".contains(digit)));
+        ensure!(
+            !device
+                && !name.ends_with([' ', '.'])
+                && !name.contains([':', '*', '?', '"', '<', '>', '|']),
+            "Zmodem 文件名在 Windows 上无效"
+        );
+    }
+    ensure!(
+        matches!(
+            Path::new(name).components().collect::<Vec<_>>().as_slice(),
+            [std::path::Component::Normal(_)]
+        ),
+        "Zmodem 文件名无效"
+    );
+    Ok(name)
+}
 fn incoming_file(root: &Path, name: &[u8], size: Option<u64>) -> Result<IncomingFile> {
-    let target = root.join(safe_name(name)?);
+    let name = incoming_name(name)?;
+    let target = root.join(name);
+    ensure!(target.parent() == Some(root), "Zmodem 文件名无效");
     ensure!(!target.try_exists()?, "接收文件已存在，请选择其他目录");
     ensure!(
         size.is_none_or(|s| s <= MAX_FILE),
@@ -545,7 +599,7 @@ fn run(
                     info.name,
                     info.size.map(|s| u64::from(s.get())),
                 )?);
-                let name = safe_name(info.name)?.to_string();
+                let name = incoming_name(info.name)?.to_string();
                 let size = info.size.map(|s| u64::from(s.get()));
                 if let Machine::Receive(r) = &mut machine {
                     r.accept_file_at(0)?;
@@ -560,7 +614,7 @@ fn run(
                     );
                     file.file.sync_all()?;
                     ensure!(!cancel.is_cancelled(), "传输已取消");
-                    std::fs::hard_link(&file.temporary, &file.target)
+                    nutty_core::files::publish_new(&file.temporary, &file.target)
                         .context("无法保存接收文件，目标可能已存在")?;
                     progress(
                         file.target
@@ -818,6 +872,80 @@ mod tests {
         }
         assert_eq!(std::fs::read_dir(root.path())?.count(), 1);
         assert_eq!(std::fs::read(root.path().join("existing"))?, b"keep");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn received_names_stay_a_single_visible_component() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a\\b",
+            "../x",
+            "a\nb",
+            "a\x1bb",
+            "invoice\u{202e}gnp.exe",
+            "a\u{2066}b",
+        ] {
+            assert!(incoming_name(name.as_bytes()).is_err(), "{name:?}");
+        }
+        assert!(incoming_name(&[0xff, 0xfe]).is_err(), "non-UTF-8");
+        for name in ["report.txt", "中文 文件.log", ".bashrc", "a.tar.gz"] {
+            assert_eq!(incoming_name(name.as_bytes()).ok(), Some(name));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_streams_and_devices_are_rejected() {
+        for name in [
+            "C:evil.dll",
+            "file.txt:hidden",
+            "CON",
+            "con.txt",
+            "NUL .log",
+            "COM1",
+            "lpt9.bin",
+            "COM¹",
+            "CONIN$",
+            "trailing.",
+            "trailing ",
+            "a*b",
+            "a?b",
+            "a|b",
+        ] {
+            assert!(incoming_name(name.as_bytes()).is_err(), "{name:?}");
+        }
+        for name in ["COM10", "console.txt", "CONFIG.SYS"] {
+            assert!(incoming_name(name.as_bytes()).is_ok(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn incoming_files_stay_in_the_chosen_directory_and_never_replace() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        std::fs::write(root.join("existing.txt"), b"keep")?;
+        assert!(incoming_file(root, b"existing.txt", None).is_err());
+        assert!(incoming_file(root, b"../escape.txt", None).is_err());
+        assert!(incoming_file(root, b"big.bin", Some(MAX_FILE + 1)).is_err());
+        let file = incoming_file(root, b"new.txt", Some(4))?;
+        assert_eq!(file.target.parent(), Some(root));
+        assert!(file.temporary.exists() && !file.target.exists());
+        let temporary = file.temporary.clone();
+        drop(file);
+        assert!(
+            !temporary.exists(),
+            "an unfinished receive leaves no partial file"
+        );
+        assert_eq!(std::fs::read(root.join("existing.txt"))?, b"keep");
         Ok(())
     }
 }

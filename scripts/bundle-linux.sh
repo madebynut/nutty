@@ -32,8 +32,11 @@ mkdir -p "$stage" "$root/dist"
 cp -p "$binary" "$stage/Nutty"
 cp "$root/assets/nutty.desktop" "$stage/nutty.desktop"
 cp "$root/assets/Nutty.png" "$stage/nutty.png"
-cp "$root/LICENSE" "$root/README.md" "$stage/"
+# The PNG is 1024 px; icon themes take the SVG under hicolor/scalable/apps.
+cp "$root/assets/Nutty.svg" "$stage/nutty.svg"
+cp "$root/LICENSE" "$root/README.md" "$root/CHANGELOG.md" "$root/SECURITY.md" "$stage/"
 cp "$root/guides/linux.md" "$stage/Linux.md"
+sh "$root/scripts/third-party-notices.sh" "$stage/THIRD-PARTY-NOTICES.txt"
 # GNU tar on Ubuntu and bsdtar on macOS both accept -C.
 tar -C "$root/target/bundle" -czf "$root/dist/$name.tar.gz" "$name"
 echo "$root/dist/$name.tar.gz"

@@ -14,10 +14,18 @@ for key in CFBundleName CFBundleDisplayName CFBundleExecutable; do
 done
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$plist")" = Nutty.icns
 cmp "$task_root/assets/Nutty.icns" "$bundle/Contents/Resources/Nutty.icns"
+for document in LICENSE THIRD-PARTY-NOTICES.txt; do
+    test -s "$bundle/Contents/Resources/$document"
+done
 codesign --verify --deep --strict "$bundle"
 version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")
-test "$("$binary" --version)" = "Nutty $version"
-echo "Nutty $version"
+# The bundle version is numeric; the executable may add a pre-release such as -beta.1.
+reported=$("$binary" --version)
+case "$reported" in
+    "Nutty $version" | "Nutty $version-"*) ;;
+    *) echo "executable version mismatch: $reported (bundle $version)" >&2; exit 1 ;;
+esac
+echo "$reported"
 if [ "$development" = true ]; then
     echo 'Development bundle identity, artwork and signature verified. This does not approve distribution.'
     exit 0

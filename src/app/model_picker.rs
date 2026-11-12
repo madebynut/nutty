@@ -245,12 +245,46 @@ impl ModelPicker {
     fn choose(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         let selecting_agent = matches!(target, Target::Agent(_));
         let _ = self.workspace.update(cx, |view, cx| {
-            view.select_assistant_target(self.pane, target, window, cx)
+            view.select_assistant_target(self.pane, target.clone(), window, cx)
         });
         if selecting_agent {
             self.reset(window, cx);
+        } else if self.has_follow_up_settings(&target, cx) {
+            // Reasoning or agent settings below the list depend on this model; keep the
+            // menu open so they can be chosen right away. Esc or an outside click closes it.
+            cx.notify();
         } else {
             self.dismiss(window, cx);
+        }
+    }
+
+    /// Whether the chosen model exposes settings in this menu beyond the model itself.
+    fn has_follow_up_settings(&self, target: &Target, cx: &App) -> bool {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return false;
+        };
+        let view = workspace.read(cx);
+        match target {
+            Target::Model { provider, model } => view
+                .store
+                .profile
+                .ai_providers
+                .iter()
+                .find(|item| item.id == *provider)
+                .filter(|provider| provider.models.iter().any(|item| item.id == *model))
+                // Auto is always offered; a real choice needs another level.
+                .is_some_and(|provider| {
+                    crate::provider_catalog::reasoning_levels(provider.kind, model).len() > 1
+                }),
+            Target::AgentValue { .. } => view.panes.get(&self.pane).is_some_and(|pane| {
+                pane.assistant
+                    .agent_settings
+                    .configuration
+                    .settings
+                    .iter()
+                    .any(|setting| setting.category != crate::acp::configuration::Category::Model)
+            }),
+            Target::Agent(_) => true,
         }
     }
 
@@ -371,14 +405,9 @@ impl Render for ModelPicker {
         let selection = view.pane_selection(self.pane, cx).ok();
         let levels = selection
             .as_ref()
-            .and_then(|selection| {
-                selection
-                    .provider
-                    .models
-                    .iter()
-                    .find(|model| model.id == selection.model)
+            .map(|selection| {
+                crate::provider_catalog::reasoning_levels(selection.provider.kind, &selection.model)
             })
-            .map(|model| Reasoning::available(&model.reasoning))
             .unwrap_or_default();
         let current = selection
             .as_ref()
@@ -712,7 +741,6 @@ mod tests {
         first.name = "Primary".into();
         first.models = vec![crate::provider::Model {
             id: "shared-model".into(),
-            reasoning: vec![],
         }];
         let mut second = first.clone();
         second.id = Uuid::new_v4();

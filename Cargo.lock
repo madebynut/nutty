@@ -4960,7 +4960,7 @@ dependencies = [
 
 [[package]]
 name = "nutty"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4985,13 +4985,14 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
  "winresource",
  "zeroize",
 ]
 
 [[package]]
 name = "nutty-ai"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -5018,7 +5019,7 @@ dependencies = [
 
 [[package]]
 name = "nutty-core"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "aes-gcm",
  "alacritty_terminal",
@@ -5028,10 +5029,12 @@ dependencies = [
  "dirs 7.0.0",
  "getrandom 0.4.3",
  "keyring",
+ "keyring-core",
  "nix 0.31.3",
  "rand 0.10.3",
  "reqwest",
  "russh",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -5041,12 +5044,13 @@ dependencies = [
  "url",
  "uuid",
  "windows-sys 0.61.2",
+ "zbus-secret-service-keyring-store",
  "zeroize",
 ]
 
 [[package]]
 name = "nutty-ssh"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5072,7 +5076,7 @@ dependencies = [
 
 [[package]]
 name = "nutty-terminal"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -5592,7 +5596,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.5"
-source = "git+https://github.com/Eugeny/russh?branch=main#b541663a88381aab9f6af1af7bbadb02e155058a"
+source = "git+https://github.com/Eugeny/russh?rev=b541663a88381aab9f6af1af7bbadb02e155058a#b541663a88381aab9f6af1af7bbadb02e155058a"
 dependencies = [
  "base16ct",
  "byteorder",
@@ -6802,7 +6806,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.65.1"
-source = "git+https://github.com/Eugeny/russh?branch=main#b541663a88381aab9f6af1af7bbadb02e155058a"
+source = "git+https://github.com/Eugeny/russh?rev=b541663a88381aab9f6af1af7bbadb02e155058a#b541663a88381aab9f6af1af7bbadb02e155058a"
 dependencies = [
  "aes 0.9.4",
  "aws-lc-rs",
@@ -6872,7 +6876,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.62.0"
-source = "git+https://github.com/Eugeny/russh?branch=main#b541663a88381aab9f6af1af7bbadb02e155058a"
+source = "git+https://github.com/Eugeny/russh?rev=b541663a88381aab9f6af1af7bbadb02e155058a#b541663a88381aab9f6af1af7bbadb02e155058a"
 dependencies = [
  "log",
  "nix 0.31.3",
@@ -6903,7 +6907,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/Eugeny/russh?branch=main#b541663a88381aab9f6af1af7bbadb02e155058a"
+source = "git+https://github.com/Eugeny/russh?rev=b541663a88381aab9f6af1af7bbadb02e155058a#b541663a88381aab9f6af1af7bbadb02e155058a"
 dependencies = [
  "chrono",
  "tokio",

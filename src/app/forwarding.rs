@@ -25,7 +25,37 @@ impl Drop for Running {
     }
 }
 
+/// Amber security notice shown under a setting, for example an exposed listener.
+pub(super) fn warning_notice(text: &str) -> gpui_kit::Div {
+    div()
+        .flex()
+        .items_start()
+        .gap_2()
+        .text_size(px(11.))
+        .text_color(rgb(0xe7b567))
+        .child(
+            Icon::new(IconName::TriangleAlert)
+                .size_3()
+                .flex_shrink_0()
+                .mt(px(2.)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(crate::i18n::text(text).to_owned()),
+        )
+}
+
 impl WorkspaceView {
+    /// Warning for the listen address being typed, before a mode is chosen.
+    pub(super) fn forward_bind_warning(&self, cx: &Context<Self>) -> Option<&'static str> {
+        let bind: std::net::SocketAddr = self.forward_bind.read(cx).value().trim().parse().ok()?;
+        (!bind.ip().is_loopback()).then_some(
+            "此监听地址对其他设备开放：本地转发会让同一网络中的设备访问目标，SOCKS5 将成为无需认证的代理。只想本机使用时请填写 127.0.0.1。",
+        )
+    }
+
     pub(super) fn forward(&mut self, mode: ForwardMode, cx: &mut Context<Self>) {
         let result = (|| -> Result<()> {
             let connection = self
@@ -107,6 +137,10 @@ impl WorkspaceView {
             self.status = Some(crate::i18n::text("此监听地址已有活动转发，请先停止它").into());
             cx.notify();
             return;
+        }
+        if rule.exposure_warning().is_some() {
+            // Audit trail: a listener reachable from other machines is being opened.
+            tracing::warn!(rule = %rule.id, mode = ?rule.mode, bind = %rule.bind, "starting forwarding listener on a non-loopback address");
         }
         let request = Uuid::new_v4();
         let cancel = CancellationToken::new();
@@ -288,6 +322,7 @@ impl WorkspaceView {
                                 .map(|(host, port)| format!("{host}:{port}"))
                                 .unwrap_or_else(|| "SOCKS5".into())
                         )))
+                    .children(rule.exposure_warning().map(warning_notice))
                     .children(connecting.then(|| {
                         div()
                             .text_size(px(11.))
