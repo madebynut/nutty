@@ -1,7 +1,7 @@
 //! Durable transfer checkpoints and bounded, post-order directory manifests.
-use super::endpoint::{self, CHUNK, Directory, Endpoint, File, Kind, Metadata};
+use super::endpoint::{self, CHUNK, Directory, Endpoint, File, Kind, LinkKind, Metadata};
 use super::{Direction, Job, Progress, Resolution, State};
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -144,6 +144,12 @@ impl Job {
             self.target = Some(resolved_target);
             self.save(root).await?;
         }
+        if matches!(source, Endpoint::Remote(_)) {
+            ensure!(remote_record_path(self.source()), "传输记录路径无效");
+        }
+        if matches!(destination, Endpoint::Remote(_)) {
+            ensure!(remote_record_path(self.target()), "传输记录路径无效");
+        }
         if self.publishing {
             return tokio::select! {
                 biased;
@@ -210,7 +216,12 @@ impl Job {
                         if destination.metadata(&dst).await?.is_some() {
                             ensure!(destination.read_link(&dst).await? == link, "暂存链接不匹配");
                         } else {
-                            destination.symlink(&dst, link).await?;
+                            let kind = if cfg!(windows) && matches!(destination, Endpoint::Local) {
+                                link_target_kind(source, &src, link).await?
+                            } else {
+                                LinkKind::File
+                            };
+                            destination.symlink(&dst, link, kind).await?;
                         }
                     }
                     Kind::File => {
@@ -557,6 +568,46 @@ impl Job {
         directory.close().await?;
         self.clean_empty_stage(destination).await
     }
+}
+pub(super) async fn link_target_kind(
+    source: &Endpoint,
+    symlink_path: &str,
+    link: &str,
+) -> Result<LinkKind> {
+    // A dangling link has no target type. Windows still needs a flag; a file link keeps the text.
+    let mut current = resolve_link_target(symlink_path, link);
+    for _ in 0..40 {
+        match source.metadata(&current).await? {
+            Some(meta) => match meta.kind {
+                Kind::Directory => return Ok(LinkKind::Directory),
+                Kind::File => return Ok(LinkKind::File),
+                Kind::Symlink => {
+                    let next = source.read_link(&current).await?;
+                    current = resolve_link_target(&current, &next);
+                }
+            },
+            None => return Ok(LinkKind::File),
+        }
+    }
+    bail!("符号链接层级超过 40 层")
+}
+fn resolve_link_target(symlink_path: &str, link: &str) -> String {
+    let bytes = link.as_bytes();
+    let absolute = link.starts_with('/')
+        || link.starts_with(r"\\")
+        || (bytes.get(1) == Some(&b':') && matches!(bytes.get(2), Some(b'/' | b'\\')));
+    if absolute {
+        link.to_string()
+    } else {
+        let parent = symlink_path
+            .rsplit_once(['/', '\\'])
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        endpoint::join(parent, link)
+    }
+}
+fn remote_record_path(path: &str) -> bool {
+    path.starts_with('/') && path.len() <= 8192 && !path.contains('\0')
 }
 async fn resolve(endpoint: &Endpoint, path: &str) -> Result<String> {
     if matches!(endpoint, Endpoint::Local) {

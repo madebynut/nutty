@@ -17,17 +17,34 @@ fn resolve<'a>(requested: &'a str, default: &'a str, names: &[String]) -> &'a st
     if requested == ".SystemUIFont" {
         return requested;
     }
-    [
-        requested,
-        default,
-        "Monaco",
-        "Cascadia Mono",
-        "Liberation Mono",
-    ]
-    .into_iter()
-    .take(if default == default_latin() { 5 } else { 2 })
-    .find(|candidate| names.iter().any(|name| name == candidate))
-    .unwrap_or(".SystemUIFont")
+    let latin = default == default_latin();
+    // macOS and Windows keep their existing candidate order. Linux-only names come last.
+    let extras: &[&str] = if latin {
+        if cfg!(target_os = "macos") || cfg!(windows) {
+            &["Monaco", "Cascadia Mono", "Liberation Mono"]
+        } else {
+            &[
+                "Monaco",
+                "Cascadia Mono",
+                "Liberation Mono",
+                "Noto Sans Mono",
+                "DejaVu Sans Mono",
+            ]
+        }
+    } else if cfg!(target_os = "macos") || cfg!(windows) {
+        &[]
+    } else {
+        &[
+            "Noto Sans CJK SC",
+            "Source Han Sans SC",
+            "WenQuanYi Micro Hei",
+        ]
+    };
+    [requested, default]
+        .into_iter()
+        .chain(extras.iter().copied())
+        .find(|candidate| names.iter().any(|name| name == candidate))
+        .unwrap_or(".SystemUIFont")
 }
 
 #[derive(Clone)]

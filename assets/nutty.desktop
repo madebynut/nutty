@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Nutty
+GenericName=Terminal
+Comment=Terminal, remote files, and AI operations
+Exec=Nutty
+Icon=nutty
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=Nutty

@@ -105,6 +105,12 @@ struct Job {
     publishing: bool,
     attempt: u8,
 }
+fn record_path_ok(path: &str, local: bool) -> bool {
+    let absolute = std::path::Path::new(path).is_absolute();
+    // A local-to-local copy stores an OS path on the side direction marks remote.
+    // Remote endpoints require a leading '/' again before using that path.
+    path.len() <= 8192 && !path.contains('\0') && (absolute || (!local && path.starts_with('/')))
+}
 impl Job {
     fn validate(&self) -> Result<()> {
         ensure!(self.version == 1, "不支持此传输记录版本");
@@ -145,15 +151,7 @@ impl Job {
             let Some(path) = path else {
                 continue;
             };
-            ensure!(
-                (if local {
-                    std::path::Path::new(path).is_absolute()
-                } else {
-                    path.starts_with('/')
-                }) && path.len() <= 8192
-                    && !path.contains('\0'),
-                "传输记录路径无效"
-            );
+            ensure!(record_path_ok(path, local), "传输记录路径无效");
         }
         Ok(())
     }

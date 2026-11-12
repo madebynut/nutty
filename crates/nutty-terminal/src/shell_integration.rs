@@ -14,6 +14,11 @@ pub fn configure(command: &mut CommandBuilder, shell: &Path) -> Result<bool> {
         command.args(["-NoLogo", "-NoExit", "-Command", POWERSHELL_INIT]);
         return Ok(true);
     }
+    if name == "cmd" {
+        command.arg("/k");
+        command.arg(cmd_init());
+        return Ok(true);
+    }
     if !matches!(name.as_str(), "zsh" | "bash" | "fish") {
         return Ok(false);
     }
@@ -199,6 +204,9 @@ pub fn remote_command(shell: &str) -> Option<String> {
             .split_once("__nutty_precmd()")
             .map(|(_, rest)| format!("{DIRECTORY}__nutty_precmd(){rest}"))?,
         "fish" => FISH_INIT.to_string(),
+        "cmd" => {
+            return Some(cmd_prompt("$P$G"));
+        }
         "sh" | "dash" | "ash" => {
             let bash = remote_command("bash")?;
             let fallback = eval_script(SH_INIT, false);
@@ -209,6 +217,27 @@ pub fn remote_command(shell: &str) -> Option<String> {
         _ => return None,
     };
     Some(eval_script(&hooks, shell == "fish"))
+}
+
+fn cmd_init() -> String {
+    let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "$P$G".into());
+    let prompt = if prompt.len() <= 128
+        && prompt.chars().all(|character| {
+            character.is_ascii()
+                && !matches!(
+                    character,
+                    '%' | '&' | '|' | '<' | '>' | '^' | '"' | '\n' | '\r' | '\0'
+                )
+        }) {
+        prompt
+    } else {
+        "$P$G".into()
+    };
+    cmd_prompt(&prompt)
+}
+
+fn cmd_prompt(body: &str) -> String {
+    format!("prompt $E]133;D;0$E\\$E]1337;CurrentDir=$P$E\\$E]133;A$E\\{body}$E]133;B$E\\")
 }
 
 fn eval_script(source: &str, fish: bool) -> String {
@@ -350,5 +379,18 @@ mod tests {
             "remote hook setup creates no files"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cmd_integration {
+    use super::remote_command;
+
+    #[test]
+    fn remote_cmd_reports_directory_without_evaluating_a_script() {
+        let command = remote_command("cmd").expect("cmd hook");
+        assert!(command.contains("1337;CurrentDir=$P"));
+        assert!(command.starts_with("prompt "));
+        assert!(!command.contains("eval"));
     }
 }

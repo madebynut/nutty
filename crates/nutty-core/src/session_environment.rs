@@ -147,6 +147,10 @@ impl Environment {
             .is_some_and(|shell| shell.eq_ignore_ascii_case(name))
     }
 
+    pub fn supports_powershell_commands(&self) -> bool {
+        self.shell_is("powershell") || self.shell_is("pwsh")
+    }
+
     pub fn supports_posix_commands(&self) -> bool {
         !["powershell", "pwsh", "cmd"]
             .iter()
@@ -184,6 +188,7 @@ mod tests {
         assert!(!crate::command::language_supported("json", &environment));
         environment.active_shell = Some("C:\\Program Files\\PowerShell\\pwsh.EXE".into());
         assert!(!environment.supports_posix_commands());
+        assert!(environment.supports_powershell_commands());
         assert!(crate::command::language_supported(
             "PowerShell",
             &environment

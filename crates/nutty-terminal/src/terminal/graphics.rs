@@ -136,6 +136,7 @@ struct Placement {
     z: i32,
     crop: [f32; 4],
     alternate: bool,
+    placeholder: bool,
 }
 pub(super) struct Decode {
     pub id: u32,
@@ -453,6 +454,9 @@ impl Graphics {
                 if number(&params, "C", 0) == 1 {
                     keys.push_str(",C=1");
                 }
+                if number(&params, "U", 0) == 1 {
+                    keys.push_str(",U=1");
+                }
                 if let Some(medium) = params.get("t")
                     && (medium == "d" || (self.allow_files && matches!(medium.as_str(), "f" | "t")))
                 {
@@ -472,7 +476,8 @@ impl Graphics {
             let mode = params.get("d").map(String::as_str).unwrap_or("a");
             match mode {
                 "a" | "A" => {
-                    self.placements.retain(|item| item.alternate != alternate);
+                    self.placements
+                        .retain(|item| item.placeholder || item.alternate != alternate);
                     if mode == "A" {
                         self.images
                             .retain(|id, _| self.placements.iter().any(|item| item.image == *id));
@@ -491,7 +496,8 @@ impl Graphics {
                     let x = number(&params, "x", 1) as f32 - 1.;
                     let y = number(&params, "y", 1) as f32 - 1.;
                     self.placements.retain(|item| {
-                        item.alternate != alternate
+                        item.placeholder
+                            || item.alternate != alternate
                             || x < item.column
                             || x >= item.column + item.columns
                             || y < item.row
@@ -500,8 +506,9 @@ impl Graphics {
                 }
                 "z" | "Z" => {
                     let z = signed(&params, "z", 0);
-                    self.placements
-                        .retain(|item| item.alternate != alternate || item.z != z);
+                    self.placements.retain(|item| {
+                        item.placeholder || item.alternate != alternate || item.z != z
+                    });
                 }
                 _ => bail!("unsupported deletion mode"),
             }
@@ -551,10 +558,8 @@ impl Graphics {
             ensure!(matches!(format, 24 | 32 | 100), "unsupported image format");
             let compression = params.get("o").map(String::as_str).unwrap_or("");
             ensure!(matches!(compression, "" | "z"), "unsupported compression");
-            ensure!(
-                number(&params, "U", 0) == 0,
-                "unicode placeholders are not supported"
-            );
+            let unicode = number(&params, "U", 0);
+            ensure!(unicode <= 1, "unsupported unicode placeholder mode");
             let mut id = number(&params, "i", 0);
             if id == 0 {
                 self.next = self.next.wrapping_add(1).max(1);
@@ -851,12 +856,15 @@ impl Graphics {
                 height as f32,
             ],
             alternate,
+            placeholder: number(params, "U", 0) == 1,
         });
-        Ok(if number(params, "C", 0) == 1 {
-            (0, 0)
-        } else {
-            (columns.ceil() as usize, rows.ceil() as usize)
-        })
+        Ok(
+            if number(params, "U", 0) == 1 || number(params, "C", 0) == 1 {
+                (0, 0)
+            } else {
+                (columns.ceil() as usize, rows.ceil() as usize)
+            },
+        )
     }
     pub fn install(
         &mut self,
@@ -923,7 +931,8 @@ impl Graphics {
             .placements
             .iter()
             .filter(|placement| {
-                placement.alternate == alternate
+                !placement.placeholder
+                    && placement.alternate == alternate
                     && placement.row + offset as f32 + placement.rows >= 0.
                     && placement.row + (offset as f32) < 500.
             })
@@ -947,6 +956,46 @@ impl Graphics {
             .collect();
         images.sort_by_key(|image| image.z);
         images
+    }
+    pub fn has_placeholder(&self) -> bool {
+        self.placements
+            .iter()
+            .any(|placement| placement.placeholder)
+    }
+    pub fn placeholder_tile(
+        &self,
+        image: u32,
+        placement: u32,
+        image_column: u32,
+        image_row: u32,
+        screen_column: usize,
+        screen_row: usize,
+    ) -> Option<DisplayImage> {
+        let placement = self.placements.iter().find(|item| {
+            item.placeholder
+                && item.image == image
+                && (placement == 0 || item.id == placement)
+                && image_column < item.columns.ceil() as u32
+                && image_row < item.rows.ceil() as u32
+        })?;
+        let stored = self.images.get(&placement.image)?;
+        let columns = placement.columns.max(1.);
+        let rows = placement.rows.max(1.);
+        Some(DisplayImage {
+            image: stored.data.clone()?,
+            column: screen_column as f32,
+            row: screen_row as f32,
+            columns: 1.,
+            rows: 1.,
+            z: placement.z,
+            crop: [
+                placement.crop[0] + image_column as f32 * placement.crop[2] / columns,
+                placement.crop[1] + image_row as f32 * placement.crop[3] / rows,
+                placement.crop[2] / columns,
+                placement.crop[3] / rows,
+            ],
+            _memory: stored.memory.clone(),
+        })
     }
     pub fn scroll(
         &mut self,
@@ -1194,8 +1243,34 @@ mod tests {
         let feature = graphics.handle(b"a=q,i=31,e=T,U=1,C=1", (0, 0), false, (8., 20.));
         assert_eq!(
             feature.response,
-            Some("\x1b_Gi=31,e=T,C=1;OK\x1b\\".into()),
-            "unsupported placeholders must not be advertised"
+            Some("\x1b_Gi=31,e=T,C=1,U=1;OK\x1b\\".into()),
+            "unicode placeholders are advertised when requested"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unicode_placeholder_placement_does_not_move_the_cursor_or_paint_at_it() -> Result<()> {
+        let mut graphics = Graphics::default();
+        let outcome = graphics.handle(
+            b"a=T,i=7,f=32,s=1,v=1,c=1,r=1,U=1,q=2;AQIDBA==",
+            (4, 2),
+            false,
+            (8., 20.),
+        );
+        assert_eq!(outcome.move_rows, 0);
+        let decode = outcome.decode.context("placeholder upload")?;
+        graphics.install(&decode, decode.pixels(), (8., 20.));
+        assert!(
+            graphics.snapshot(0, false).is_empty(),
+            "a placeholder placement stays off the cursor grid"
+        );
+        let tile = graphics
+            .placeholder_tile(7, 0, 0, 0, 3, 5)
+            .context("placeholder cell")?;
+        assert_eq!(
+            (tile.column, tile.row, tile.columns, tile.rows),
+            (3., 5., 1., 1.)
         );
         Ok(())
     }

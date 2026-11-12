@@ -313,120 +313,169 @@ pub fn merge(current: &Profile, incoming: &Archive) -> Result<Archive> {
 }
 
 struct SshBlock {
-    patterns: Vec<String>,
-    directives: Vec<(String, String)>,
+    selector: SshSelector,
+    directives: Vec<(String, Vec<String>)>,
+    active: bool,
+}
+
+enum SshSelector {
+    Host(Vec<String>),
+    Match(Vec<MatchCriterion>),
+}
+
+enum MatchCriterion {
+    All,
+    Host(String),
+    OriginalHost(String),
+    User(String),
+    LocalUser(String),
+}
+
+struct ImportBudget {
+    files: usize,
+    bytes: usize,
 }
 
 pub fn openssh(text: &str, directory: &Path) -> Result<(Vec<Connection>, Vec<String>)> {
-    ensure!(text.len() <= 2 * 1024 * 1024, "OpenSSH 配置超过 2 MiB");
     let mut warnings = Vec::new();
-    let mut blocks = vec![SshBlock {
-        patterns: vec!["*".into()],
-        directives: Vec::new(),
-    }];
+    let mut blocks = Vec::new();
     let mut names = Vec::new();
-    let mut matched = false;
-    for (line, source) in text.lines().enumerate() {
-        let source = source.trim();
-        if source.is_empty() || source.starts_with('#') {
-            continue;
-        }
-        let (key, value) = source
-            .split_once([' ', '\t', '='])
-            .context("OpenSSH 配置行缺少值")?;
-        let key = key.to_ascii_lowercase();
-        let tokens = ssh_tokens(value.trim_start_matches([' ', '\t', '=']))
-            .with_context(|| format!("OpenSSH 第 {} 行", line + 1))?;
-        let value = tokens.join(" ");
-        if key == "match" {
-            matched = true;
-            warnings.push(format!("跳过 Match 块（第 {} 行）", line + 1));
-            continue;
-        }
-        if key == "host" {
-            matched = false;
-            let patterns = tokens;
-            for name in &patterns {
-                if !name.contains(['*', '?', '!']) && !names.contains(name) {
-                    names.push(name.clone());
-                }
-            }
-            blocks.push(SshBlock {
-                patterns,
-                directives: Vec::new(),
-            });
-        } else if !matched {
-            if matches!(
-                key.as_str(),
-                "hostname"
-                    | "port"
-                    | "user"
-                    | "identityfile"
-                    | "certificatefile"
-                    | "proxyjump"
-                    | "serveraliveinterval"
-                    | "serveralivecountmax"
-            ) {
-                if tokens.len() != 1 || value.contains('%') {
-                    warnings.push(format!(
-                        "未导入 {}（第 {} 行）：多值或百分号展开暂不支持",
-                        key,
-                        line + 1
-                    ));
-                    continue;
-                }
-                blocks
-                    .last_mut()
-                    .context("SSH import block")?
-                    .directives
-                    .push((key, value));
-            } else if matches!(
-                key.as_str(),
-                "include" | "proxycommand" | "localcommand" | "remotecommand"
-            ) {
-                warnings.push(format!(
-                    "未导入 {}（第 {} 行）；不会执行外部命令或读取 Include",
-                    key,
-                    line + 1
-                ));
-            }
-        }
-    }
+    let mut seen = HashSet::new();
+    let mut budget = ImportBudget { files: 0, bytes: 0 };
+    parse_ssh_file(
+        text,
+        directory,
+        0,
+        &mut budget,
+        &mut seen,
+        &mut warnings,
+        &mut blocks,
+        &mut names,
+    )?;
     ensure!(
         names.len() <= 512 && !names.is_empty(),
         "配置中没有可导入的明确 Host 名称，或超过 512 个"
     );
+    let local_user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default();
+    let home = dirs::home_dir().unwrap_or_else(|| directory.to_path_buf());
+    let hostname = local_hostname();
+    let uid = local_uid();
     let identities: HashMap<_, _> = names
         .iter()
         .map(|name| (name.clone(), Uuid::new_v4()))
         .collect();
     let mut connections = Vec::new();
     for name in names {
-        let mut values = HashMap::new();
-        for SshBlock {
-            patterns,
-            directives,
-        } in &blocks
-        {
-            let includes = patterns
-                .iter()
-                .any(|pattern| !pattern.starts_with('!') && wildcard(pattern, &name));
-            let excludes = patterns.iter().any(|pattern| {
-                pattern
-                    .strip_prefix('!')
-                    .is_some_and(|pattern| wildcard(pattern, &name))
-            });
-            if includes && !excludes {
-                for (key, value) in directives {
-                    values.entry(key.as_str()).or_insert(value.as_str());
+        let mut values: HashMap<String, Vec<String>> = HashMap::new();
+        let mut user = local_user.clone();
+        for block in &blocks {
+            if !block.active || !selector_matches(&block.selector, &name, &user, &local_user) {
+                continue;
+            }
+            for (key, items) in &block.directives {
+                if key == "identityfile" || key == "certificatefile" {
+                    values.entry(key.clone()).or_default().extend(items.clone());
+                } else if !values.contains_key(key) {
+                    values.insert(key.clone(), items.clone());
+                    if key == "user"
+                        && let Some(raw) = items.first()
+                        && let Ok(expanded) = expand_token(
+                            raw,
+                            &name,
+                            &name,
+                            22,
+                            &local_user,
+                            &local_user,
+                            &home,
+                            &hostname,
+                            uid,
+                        )
+                        && !expanded.is_empty()
+                    {
+                        user = expanded;
+                    }
                 }
             }
         }
-        let path = |value: &str| -> PathBuf {
+        let mut destination = name.clone();
+        if let Some(configured) = values.get("hostname").and_then(|items| items.first()) {
+            match expand_token(
+                configured,
+                &name,
+                &name,
+                22,
+                &user,
+                &local_user,
+                &home,
+                &hostname,
+                uid,
+            ) {
+                Ok(value) if !value.is_empty() => destination = value,
+                Ok(_) => warnings.push(format!("{name} 的 HostName 展开后为空")),
+                Err(reason) => warnings.push(format!("{name} 的 HostName {reason}")),
+            }
+        }
+        let port = match values.get("port").and_then(|items| items.first()) {
+            Some(value) => match expand_token(
+                value,
+                &name,
+                &destination,
+                22,
+                &user,
+                &local_user,
+                &home,
+                &hostname,
+                uid,
+            ) {
+                Ok(value) => match value.parse::<u16>() {
+                    Ok(port) if port > 0 => port,
+                    _ => {
+                        warnings.push(format!("{name} 的 Port 无效，已使用 22"));
+                        22
+                    }
+                },
+                Err(reason) => {
+                    warnings.push(format!("{name} 的 Port {reason}"));
+                    22
+                }
+            },
+            None => 22,
+        };
+        if let Some(configured) = values.get("user").and_then(|items| items.first()) {
+            match expand_token(
+                configured,
+                &name,
+                &destination,
+                port,
+                &local_user,
+                &local_user,
+                &home,
+                &hostname,
+                uid,
+            ) {
+                Ok(value) if !value.is_empty() => user = value,
+                Ok(_) => warnings.push(format!("{name} 的 User 展开后为空")),
+                Err(reason) => warnings.push(format!("{name} 的 User {reason}")),
+            }
+        }
+        let expand = |value: &str| {
+            expand_token(
+                value,
+                &name,
+                &destination,
+                port,
+                &user,
+                &local_user,
+                &home,
+                &hostname,
+                uid,
+            )
+        };
+        let path_of = |value: &str| -> PathBuf {
             if let Some(value) = value.strip_prefix("~/") {
-                dirs::home_dir()
-                    .unwrap_or_else(|| directory.to_path_buf())
-                    .join(value)
+                home.join(value)
             } else {
                 let path = PathBuf::from(value);
                 if path.is_absolute() {
@@ -442,41 +491,80 @@ pub fn openssh(text: &str, directory: &Path) -> Result<(Vec<Connection>, Vec<Str
             id: identities[&name],
             name: name.clone(),
             group: "OpenSSH".into(),
-            host: values.get("hostname").unwrap_or(&name.as_str()).to_string(),
-            port: values.get("port").unwrap_or(&"22").parse()?,
-            user: values
-                .get("user")
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| {
-                    std::env::var("USER")
-                        .or_else(|_| std::env::var("USERNAME"))
-                        .unwrap_or_default()
-                }),
+            host: destination.clone(),
+            port,
+            user: user.clone(),
             auth: Authentication::Agent,
             jump: None,
             ssh: Default::default(),
             proxy: None,
         };
-        if let Some(identity) = values.get("identityfile") {
-            connection.auth = Authentication::Key {
-                path: path(identity),
-                certificate: values.get("certificatefile").map(|value| path(value)),
-            };
+        if let Some(items) = values.get("identityfile") {
+            let mut paths = Vec::new();
+            for item in items {
+                match expand(item) {
+                    Ok(value) if !value.is_empty() => paths.push(path_of(&value)),
+                    Ok(_) => warnings.push(format!("{name} 的 IdentityFile 展开后为空")),
+                    Err(reason) => warnings.push(format!("{name} 的 IdentityFile {reason}")),
+                }
+            }
+            if let Some(path) = paths
+                .iter()
+                .find(|path| path.is_file())
+                .cloned()
+                .or_else(|| paths.into_iter().next())
+            {
+                let certificate = values.get("certificatefile").and_then(|items| {
+                    let mut fallback = None;
+                    for item in items {
+                        let Ok(value) = expand(item) else {
+                            continue;
+                        };
+                        if value.is_empty() {
+                            continue;
+                        }
+                        let path = path_of(&value);
+                        if path.is_file() {
+                            return Some(path);
+                        }
+                        if fallback.is_none() {
+                            fallback = Some(path);
+                        }
+                    }
+                    fallback
+                });
+                connection.auth = Authentication::Key { path, certificate };
+            }
         }
-        if let Some(interval) = values.get("serveraliveinterval") {
-            connection.ssh.keepalive_seconds = interval.parse()?;
+        if let Some(interval) = values
+            .get("serveraliveinterval")
+            .and_then(|items| items.first())
+            && let Ok(value) = expand(interval)
+            && let Ok(seconds) = value.parse()
+        {
+            connection.ssh.keepalive_seconds = seconds;
         }
-        if let Some(count) = values.get("serveralivecountmax") {
-            connection.ssh.keepalive_max = count.parse()?;
+        if let Some(count) = values
+            .get("serveralivecountmax")
+            .and_then(|items| items.first())
+            && let Ok(value) = expand(count)
+            && let Ok(max) = value.parse()
+        {
+            connection.ssh.keepalive_max = max;
         }
-        if let Some(jump) = values.get("proxyjump").filter(|value| **value != "none") {
-            if let Some(id) = identities.get(*jump) {
-                connection.jump = Some(*id);
-            } else {
-                warnings.push(format!(
-                    "{} 的 ProxyJump {} 未导入：请使用已定义的单个 Host 名称",
-                    name, jump
-                ));
+        if let Some(jump) = values.get("proxyjump").and_then(|items| items.first()) {
+            match expand(jump) {
+                Ok(value) if value == "none" => {}
+                Ok(value) => {
+                    if let Some(id) = identities.get(&value) {
+                        connection.jump = Some(*id);
+                    } else {
+                        warnings.push(format!(
+                            "{name} 的 ProxyJump {value} 未导入：请使用已定义的单个 Host 名称"
+                        ));
+                    }
+                }
+                Err(reason) => warnings.push(format!("{name} 的 ProxyJump {reason}")),
             }
         }
         connection.validate()?;
@@ -489,6 +577,487 @@ pub fn openssh(text: &str, directory: &Path) -> Result<(Vec<Connection>, Vec<Str
     };
     profile.validate()?;
     Ok((connections, warnings))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Include parsing threads one bounded import state without a shared owner"
+)]
+fn parse_ssh_file(
+    text: &str,
+    directory: &Path,
+    depth: usize,
+    budget: &mut ImportBudget,
+    seen: &mut HashSet<PathBuf>,
+    warnings: &mut Vec<String>,
+    blocks: &mut Vec<SshBlock>,
+    names: &mut Vec<String>,
+) -> Result<()> {
+    ensure!(text.len() <= 2 * 1024 * 1024, "OpenSSH 配置超过 2 MiB");
+    ensure!(
+        budget.bytes.saturating_add(text.len()) <= 2 * 1024 * 1024,
+        "OpenSSH 配置超过 2 MiB"
+    );
+    budget.bytes += text.len();
+    if blocks.is_empty() {
+        blocks.push(SshBlock {
+            selector: SshSelector::Host(vec!["*".into()]),
+            directives: Vec::new(),
+            active: true,
+        });
+    }
+    let mut skipping = false;
+    for (line, source) in text.lines().enumerate() {
+        let source = source.trim();
+        if source.is_empty() || source.starts_with('#') {
+            continue;
+        }
+        let (key, value) = source
+            .split_once([' ', '\t', '='])
+            .context("OpenSSH 配置行缺少值")?;
+        let key = key.to_ascii_lowercase();
+        let tokens = ssh_tokens(value.trim_start_matches([' ', '\t', '=']))
+            .with_context(|| format!("OpenSSH 第 {} 行", line + 1))?;
+        if key == "host" {
+            skipping = false;
+            for name in &tokens {
+                if !name.contains(['*', '?', '!']) && !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+            blocks.push(SshBlock {
+                selector: SshSelector::Host(tokens),
+                directives: Vec::new(),
+                active: true,
+            });
+            continue;
+        }
+        if key == "match" {
+            match match_criteria(&tokens) {
+                Ok(criteria) => {
+                    skipping = false;
+                    blocks.push(SshBlock {
+                        selector: SshSelector::Match(criteria),
+                        directives: Vec::new(),
+                        active: true,
+                    });
+                }
+                Err(reason) => {
+                    skipping = true;
+                    warnings.push(format!("跳过 Match 块（第 {} 行）：{reason}", line + 1));
+                }
+            }
+            continue;
+        }
+        if skipping {
+            continue;
+        }
+        if key == "include" {
+            for token in tokens {
+                read_include(
+                    &token, directory, depth, line, budget, seen, warnings, blocks, names,
+                )?;
+            }
+            continue;
+        }
+        if matches!(
+            key.as_str(),
+            "proxycommand" | "localcommand" | "remotecommand"
+        ) {
+            let label = match key.as_str() {
+                "localcommand" => "LocalCommand",
+                "remotecommand" => "RemoteCommand",
+                _ => "ProxyCommand",
+            };
+            warnings.push(format!(
+                "未导入 {label}（第 {} 行）；不会执行外部命令",
+                line + 1
+            ));
+            continue;
+        }
+        if !matches!(
+            key.as_str(),
+            "hostname"
+                | "port"
+                | "user"
+                | "identityfile"
+                | "certificatefile"
+                | "proxyjump"
+                | "serveraliveinterval"
+                | "serveralivecountmax"
+        ) {
+            continue;
+        }
+        if tokens.is_empty() {
+            warnings.push(format!("未导入 {key}（第 {} 行）：缺少值", line + 1));
+            continue;
+        }
+        let block = blocks.last_mut().context("SSH import block")?;
+        if key == "identityfile" || key == "certificatefile" {
+            if let Some((_, items)) = block.directives.iter_mut().find(|(name, _)| name == &key) {
+                items.extend(tokens);
+            } else {
+                block.directives.push((key, tokens));
+            }
+        } else if tokens.len() == 1 {
+            let value = tokens.into_iter().next().unwrap_or_default();
+            if !block.directives.iter().any(|(name, _)| name == &key) {
+                block.directives.push((key, vec![value]));
+            }
+        } else {
+            warnings.push(format!("未导入 {key}（第 {} 行）：只接受一个值", line + 1));
+        }
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Include parsing threads one bounded import state without a shared owner"
+)]
+fn read_include(
+    token: &str,
+    directory: &Path,
+    depth: usize,
+    line: usize,
+    budget: &mut ImportBudget,
+    seen: &mut HashSet<PathBuf>,
+    warnings: &mut Vec<String>,
+    blocks: &mut Vec<SshBlock>,
+    names: &mut Vec<String>,
+) -> Result<()> {
+    if depth >= 8 || budget.files >= 32 {
+        warnings.push(format!(
+            "未读取 Include（第 {} 行）：超过文件或层级限制",
+            line + 1
+        ));
+        return Ok(());
+    }
+    let path = if let Some(value) = token.strip_prefix("~/") {
+        dirs::home_dir()
+            .unwrap_or_else(|| directory.to_path_buf())
+            .join(value)
+    } else {
+        let path = PathBuf::from(token);
+        if path.is_absolute() {
+            path
+        } else {
+            directory.join(path)
+        }
+    };
+    let mut files = Vec::new();
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(['*', '?']))
+    {
+        let pattern = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let parent = path.parent().unwrap_or(directory);
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if wildcard(&pattern, name) {
+                    files.push(entry.path());
+                }
+            }
+            files.sort();
+        }
+    } else {
+        files.push(path);
+    }
+    if files.is_empty() {
+        warnings.push(format!(
+            "未读取 Include（第 {} 行）：没有匹配的文件",
+            line + 1
+        ));
+        return Ok(());
+    }
+    for file in files {
+        if budget.files >= 32 {
+            warnings.push(format!(
+                "未读取 Include（第 {} 行）：超过文件数量限制",
+                line + 1
+            ));
+            break;
+        }
+        let Ok(metadata) = std::fs::metadata(&file) else {
+            warnings.push(format!(
+                "未读取 Include {}（第 {} 行）",
+                file.display(),
+                line + 1
+            ));
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 {
+            warnings.push(format!(
+                "未读取 Include {}（第 {} 行）：不是普通文件或超过大小限制",
+                file.display(),
+                line + 1
+            ));
+            continue;
+        }
+        let key = file.canonicalize().unwrap_or(file.clone());
+        if !seen.insert(key) {
+            warnings.push(format!(
+                "未读取 Include {}（第 {} 行）：循环引用",
+                file.display(),
+                line + 1
+            ));
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            warnings.push(format!(
+                "未读取 Include {}（第 {} 行）",
+                file.display(),
+                line + 1
+            ));
+            continue;
+        };
+        budget.files += 1;
+        let parent = file.parent().unwrap_or(directory);
+        parse_ssh_file(
+            &text,
+            parent,
+            depth + 1,
+            budget,
+            seen,
+            warnings,
+            blocks,
+            names,
+        )?;
+    }
+    Ok(())
+}
+
+fn match_criteria(tokens: &[String]) -> Result<Vec<MatchCriterion>, String> {
+    if tokens.is_empty() {
+        return Err("缺少条件".into());
+    }
+    let mut criteria = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let key = tokens[index].to_ascii_lowercase();
+        index += 1;
+        match key.as_str() {
+            "all" => criteria.push(MatchCriterion::All),
+            "canonical" | "final" => {
+                return Err("连接前无法判断 canonical 或 final".into());
+            }
+            "exec" => return Err("不会执行 exec".into()),
+            "host" | "originalhost" | "user" | "localuser" => {
+                let Some(pattern) = tokens.get(index) else {
+                    return Err(format!("{key} 缺少模式"));
+                };
+                index += 1;
+                criteria.push(match key.as_str() {
+                    "host" => MatchCriterion::Host(pattern.clone()),
+                    "originalhost" => MatchCriterion::OriginalHost(pattern.clone()),
+                    "user" => MatchCriterion::User(pattern.clone()),
+                    _ => MatchCriterion::LocalUser(pattern.clone()),
+                });
+            }
+            _ => return Err(format!("不支持条件 {key}")),
+        }
+    }
+    if criteria.is_empty() {
+        return Err("缺少条件".into());
+    }
+    Ok(criteria)
+}
+
+fn selector_matches(selector: &SshSelector, name: &str, user: &str, local_user: &str) -> bool {
+    match selector {
+        SshSelector::Host(patterns) => {
+            let includes = patterns
+                .iter()
+                .any(|pattern| !pattern.starts_with('!') && wildcard(pattern, name));
+            let excludes = patterns.iter().any(|pattern| {
+                pattern
+                    .strip_prefix('!')
+                    .is_some_and(|pattern| wildcard(pattern, name))
+            });
+            includes && !excludes
+        }
+        SshSelector::Match(criteria) => criteria.iter().all(|criterion| match criterion {
+            MatchCriterion::All => true,
+            MatchCriterion::Host(pattern) | MatchCriterion::OriginalHost(pattern) => {
+                wildcard(pattern, name)
+            }
+            MatchCriterion::User(pattern) => wildcard(pattern, user),
+            MatchCriterion::LocalUser(pattern) => wildcard(pattern, local_user),
+        }),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Percent expansion needs the alias, destination, port, and local identity together"
+)]
+fn expand_token(
+    value: &str,
+    alias: &str,
+    destination: &str,
+    port: u16,
+    user: &str,
+    local_user: &str,
+    home: &Path,
+    hostname: &str,
+    uid: Option<u32>,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        if character != '%' {
+            output.push(character);
+            continue;
+        }
+        let Some(token) = chars.next() else {
+            return Err("百分号展开不完整".into());
+        };
+        match token {
+            '%' => output.push('%'),
+            'h' => output.push_str(destination),
+            'n' | 'k' => output.push_str(alias),
+            'p' => output.push_str(&port.to_string()),
+            'r' => output.push_str(user),
+            'd' => output.push_str(&home.to_string_lossy()),
+            'u' => output.push_str(local_user),
+            'l' => output.push_str(hostname),
+            'L' => output.push_str(hostname.split('.').next().unwrap_or(hostname)),
+            'i' => {
+                let Some(uid) = uid else {
+                    return Err("此平台无法展开 %i".into());
+                };
+                output.push_str(&uid.to_string());
+            }
+            'C' => {
+                let material = format!("{hostname}{destination}{port}{user}");
+                output.push_str(&hex_sha1(sha1(material.as_bytes())));
+            }
+            _ => return Err(format!("不支持百分号标记 %{token}")),
+        }
+    }
+    if output.contains(['\0', '\r', '\n']) {
+        return Err("展开结果包含控制字符".into());
+    }
+    Ok(output)
+}
+
+fn local_hostname() -> String {
+    #[cfg(unix)]
+    {
+        let mut buffer = [0u8; 256];
+        // SAFETY: the buffer is writable for the length passed to gethostname.
+        let result = unsafe { nix::libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+        if result == 0 {
+            let end = buffer
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(buffer.len());
+            if let Ok(name) = std::str::from_utf8(&buffer[..end])
+                && !name.is_empty()
+            {
+                return name.to_string();
+            }
+        }
+    }
+    #[cfg(windows)]
+    if let Ok(name) = std::env::var("COMPUTERNAME")
+        && !name.is_empty()
+    {
+        return name;
+    }
+    "localhost".into()
+}
+
+fn local_uid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid reads the process credential and takes no pointers.
+        Some(unsafe { nix::libc::getuid() })
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn sha1(data: &[u8]) -> [u8; 20] {
+    let mut state = [
+        0x6745_2301_u32,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut message = data.to_vec();
+    message.push(0x80);
+    while (message.len() % 64) != 56 {
+        message.push(0);
+    }
+    message.extend(bit_len.to_be_bytes());
+    let (blocks, rest) = message.as_chunks::<64>();
+    debug_assert!(rest.is_empty());
+    for block in blocks {
+        let mut words = [0_u32; 80];
+        for (index, chunk) in block.as_chunks::<4>().0.iter().enumerate() {
+            words[index] = u32::from_be_bytes(*chunk);
+        }
+        for index in 16..80 {
+            words[index] =
+                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
+                    .rotate_left(1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e) =
+            (state[0], state[1], state[2], state[3], state[4]);
+        for (index, word) in words.iter().enumerate() {
+            let (f, k) = match index {
+                0..=19 => ((b & c) | (!b & d), 0x5A82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let next = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(*word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = next;
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+    }
+    let mut digest = [0_u8; 20];
+    for (index, word) in state.iter().enumerate() {
+        digest[index * 4..][..4].copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
+fn hex_sha1(digest: [u8; 20]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(40);
+    for byte in digest {
+        text.push(HEX[(byte >> 4) as usize] as char);
+        text.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    text
 }
 fn ssh_tokens(value: &str) -> Result<Vec<String>> {
     let mut tokens = Vec::new();
@@ -665,6 +1234,57 @@ mod tests {
         assert_eq!(merged.profile.connections.len(), 2);
         assert_eq!(merged.profile.connections[0].host, "existing.example");
         assert_eq!(merged.profile.connections[1].jump, Some(existing.id));
+        Ok(())
+    }
+
+    #[test]
+    fn ssh_import_expands_safe_tokens_reads_includes_and_never_runs_commands() -> Result<()> {
+        assert_eq!(
+            hex_sha1(sha1(b"")),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
+        assert_eq!(
+            hex_sha1(sha1(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("id_present"), "key")?;
+        std::fs::write(
+            directory.path().join("included"),
+            "Host extra\n HostName extra.example\n",
+        )?;
+        let (connections, warnings) = openssh(
+            "Host web\n HostName %h.example.com\n User deploy\n IdentityFile missing\n IdentityFile id_present\nInclude included\nMatch host web\n Port 2222\nMatch exec touch-ran\n User pwned\nHost extra\n ProxyCommand echo hi\n",
+            directory.path(),
+        )?;
+        let web = connections
+            .iter()
+            .find(|item| item.name == "web")
+            .expect("web");
+        assert_eq!(web.host, "web.example.com");
+        assert_eq!(web.user, "deploy");
+        assert_eq!(web.port, 2222);
+        let Authentication::Key { path, certificate } = &web.auth else {
+            panic!("identity");
+        };
+        assert_eq!(path, &directory.path().join("id_present"));
+        assert!(certificate.is_none());
+        assert!(connections.iter().any(|item| item.name == "extra"));
+        assert!(warnings.iter().any(|warning| warning.contains("不会执行")));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("ProxyCommand"))
+        );
+        assert!(!directory.path().join("touch-ran").exists());
+        let (unknown, warnings) = openssh(
+            "Host bad\n HostName %Q.example\n Port abc\n",
+            directory.path(),
+        )?;
+        assert_eq!(unknown[0].host, "bad");
+        assert_eq!(unknown[0].port, 22);
+        assert!(warnings.iter().any(|warning| warning.contains("百分号")));
+        assert!(warnings.iter().any(|warning| warning.contains("Port")));
         Ok(())
     }
 }

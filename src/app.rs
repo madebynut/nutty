@@ -180,7 +180,7 @@ impl Form {
                 })
                 .collect(),
             editing: None,
-            auth: 0,
+            auth: 1,
             appearance: None,
             jump: None,
             jump_ids: Vec::new(),
@@ -407,6 +407,8 @@ pub(crate) struct WorkspaceView {
     data_preview: Option<crate::portable::Preview>,
     filter: Entity<InputState>,
     prompts: VecDeque<HostPrompt>,
+    clipboard_pane: Option<Uuid>,
+    clipboard_needs_focus: bool,
     auth_dialog: Option<AuthDialog>,
     pending_authentication: VecDeque<AuthPrompt>,
     file_connection: Option<Arc<Node>>,
@@ -601,6 +603,8 @@ impl WorkspaceView {
             data_preview: None,
             filter,
             prompts: VecDeque::new(),
+            clipboard_pane: None,
+            clipboard_needs_focus: false,
             auth_dialog: None,
             pending_authentication: VecDeque::new(),
             file_connection: None,
@@ -879,6 +883,19 @@ impl WorkspaceView {
                             }
                         }
                     }
+                }
+                PaneEvent::ClipboardPaste if workspace.clipboard_pane != Some(id) => {
+                    if let Some(previous) = workspace.clipboard_pane.take()
+                        && let Some(pane) = workspace.panes.get(&previous)
+                    {
+                        pane.engine.answer_clipboard_paste(None);
+                        pane.view.update(cx, |terminal, cx| {
+                            terminal.finish_clipboard_prompt();
+                            cx.notify();
+                        });
+                    }
+                    workspace.clipboard_pane = Some(id);
+                    workspace.clipboard_needs_focus = true;
                 }
                 _ => {}
             }
@@ -1992,6 +2009,20 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    fn answer_clipboard(&mut self, cx: &mut Context<Self>, text: Option<&str>) {
+        self.clipboard_needs_focus = false;
+        if let Some(id) = self.clipboard_pane.take()
+            && let Some(pane) = self.panes.get(&id)
+        {
+            pane.engine.answer_clipboard_paste(text);
+            pane.view.update(cx, |terminal, cx| {
+                terminal.finish_clipboard_prompt();
+                cx.notify();
+            });
+        }
+        cx.notify();
+    }
+
     fn focus_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.modal.is_some()
             || self.record_editor.is_some()
@@ -2001,6 +2032,7 @@ impl WorkspaceView {
             || self.file_action.is_some()
             || self.overlay.is_some()
             || !self.prompts.is_empty()
+            || self.clipboard_pane.is_some()
             || self
                 .auth_dialog
                 .as_ref()
@@ -2769,6 +2801,61 @@ impl WorkspaceView {
                     .into_any_element(),
             );
         }
+        if self.clipboard_pane.is_some() {
+            return Some(
+                modal_container(p)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_5()
+                            .p_6()
+                            .w(px(520.))
+                            .rounded_xl()
+                            .bg(rgb(p.sidebar))
+                            .border_1()
+                            .border_color(rgb(p.border))
+                            .child(
+                                div()
+                                    .text_size(px(18.))
+                                    .child(crate::i18n::text("远端请求读取剪贴板")),
+                            )
+                            .child(
+                                div().text_size(px(12.)).text_color(rgb(p.muted)).child(
+                                    crate::i18n::text(
+                                        "允许后，当前窗格中的程序会收到剪贴板文本。拒绝不会改动剪贴板。",
+                                    ),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        crate::controls::button("deny-clipboard")
+                                            .ghost()
+                                            .label(crate::i18n::text("拒绝"))
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.answer_clipboard(cx, None);
+                                            })),
+                                    )
+                                    .child(
+                                        crate::controls::button("allow-clipboard")
+                                            .primary()
+                                            .label(crate::i18n::text("允许读取"))
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                let text = cx
+                                                    .read_from_clipboard()
+                                                    .and_then(|item| item.text());
+                                                view.answer_clipboard(cx, text.as_deref());
+                                            })),
+                                    ),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
         if self.connection_removal.is_some() {
             return Some(self.render_connection_removal(cx));
         }
@@ -2994,6 +3081,10 @@ impl Drop for WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.clipboard_needs_focus {
+            self.clipboard_needs_focus = false;
+            self.modal_focus.focus(window, cx);
+        }
         let p = self.palette();
         let active_layout = self
             .tabs
@@ -3104,12 +3195,18 @@ impl Render for WorkspaceView {
                         cx.stop_propagation();
                         return;
                     }
+                    if view.clipboard_pane.is_some() && event.keystroke.key == "escape" {
+                        view.answer_clipboard(cx, None);
+                        cx.stop_propagation();
+                        return;
+                    }
                     if view.overlay.is_some()
                         || view.modal.is_some()
                         || view.connection_removal.is_some()
                         || view.file_editor.is_some()
                         || view.file_action.is_some()
                         || !view.prompts.is_empty()
+                        || view.clipboard_pane.is_some()
                         || view
                             .auth_dialog
                             .as_ref()

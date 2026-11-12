@@ -32,6 +32,13 @@ pub async fn socket_path(configured: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("SSH_AUTH_SOCK").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(path));
     }
+    #[cfg(target_os = "linux")]
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR")
+        && let Some(path) =
+            agent_socket_in(Path::new(&runtime), nix::unistd::Uid::current().as_raw())
+    {
+        return Ok(path);
+    }
     #[cfg(target_os = "macos")]
     {
         // Finder-launched apps do not necessarily inherit the user's Shell environment.
@@ -103,6 +110,27 @@ pub async fn probe(configured: Option<&Path>) -> Result<Info> {
     }
     #[cfg(not(any(unix, windows)))]
     anyhow::bail!("此平台的 SSH Agent 尚未接入，请使用密钥或密码");
+}
+
+/// A desktop launch may not inherit `SSH_AUTH_SOCK`. Only sockets owned by this
+/// user inside the runtime directory are eligible; nothing under `/tmp` is scanned.
+#[cfg(all(unix, any(target_os = "linux", test)))]
+fn agent_socket_in(runtime: &Path, uid: u32) -> Option<PathBuf> {
+    if !runtime.is_absolute() {
+        return None;
+    }
+    ["keyring/ssh", "gcr/ssh", "ssh-agent.socket"]
+        .into_iter()
+        .map(|name| runtime.join(name))
+        .find(|path| owned_socket(path, uid))
+}
+
+#[cfg(all(unix, any(target_os = "linux", test)))]
+fn owned_socket(path: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    std::fs::symlink_metadata(path).is_ok_and(|meta| {
+        meta.file_type().is_socket() && meta.uid() == uid && path.as_os_str().len() <= 4096
+    })
 }
 
 #[cfg(all(test, unix))]

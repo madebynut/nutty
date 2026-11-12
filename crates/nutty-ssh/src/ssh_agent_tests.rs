@@ -99,6 +99,29 @@ async fn public_identity_probe_reports_empty_and_loaded_agents_without_signing()
 }
 
 #[tokio::test]
+async fn session_agent_lookup_uses_only_an_owned_socket_in_the_runtime_directory() -> Result<()> {
+    let runtime = tempfile::tempdir()?;
+    let root = runtime.path();
+    tokio::fs::create_dir(root.join("keyring")).await?;
+    tokio::fs::create_dir(root.join("gcr")).await?;
+    let preferred = root.join("keyring/ssh");
+    let later = root.join("ssh-agent.socket");
+    let _preferred_listener = UnixListener::bind(&preferred)?;
+    let _later_listener = UnixListener::bind(&later)?;
+    std::os::unix::fs::symlink("/tmp/not-an-agent", root.join("gcr/ssh"))?;
+    let uid = nix::unistd::Uid::current().as_raw();
+    assert_eq!(
+        agent_socket_in(root, uid).as_deref(),
+        Some(preferred.as_path())
+    );
+    assert!(agent_socket_in(root, uid.wrapping_add(1)).is_none());
+    assert!(agent_socket_in(Path::new("relative"), uid).is_none());
+    tokio::fs::remove_file(&preferred).await?;
+    assert_eq!(agent_socket_in(root, uid).as_deref(), Some(later.as_path()));
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_unresponsive_agent_has_a_bounded_identity_timeout() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let socket = directory.path().join("s");

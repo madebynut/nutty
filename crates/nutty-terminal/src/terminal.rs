@@ -28,6 +28,7 @@ mod bootstrap_echo;
 mod graphics;
 pub use graphics::{DisplayImage, Raster};
 mod inline_images;
+mod placeholders;
 mod protocol;
 mod screen;
 mod shell;
@@ -35,6 +36,7 @@ pub mod zmodem;
 
 /// One MiB accommodates large pastes while keeping each queued message bounded.
 const MAX_INPUT: usize = 1024 * 1024;
+const CLIPBOARD_LIMIT: usize = 256 * 1024;
 
 #[derive(Debug)]
 pub enum Command {
@@ -85,6 +87,8 @@ impl EventListener for Listener {
     }
 }
 
+type ClipboardReply = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
 struct Core {
     bootstrap_echo: Option<bootstrap_echo::Echo>,
     environment: crate::session_environment::Environment,
@@ -107,6 +111,8 @@ struct Core {
     awaiting_echo: bool,
     error: Option<String>,
     search: Option<(String, Point)>,
+    clipboard_copy: Option<String>,
+    clipboard_paste: Option<ClipboardReply>,
 }
 
 #[derive(Clone, Debug)]
@@ -171,6 +177,7 @@ impl Terminal {
                     Config {
                         scrolling_history: preferences.scrollback,
                         default_cursor_style: preferences.terminal.cursor_style(),
+                        osc52: alacritty_terminal::term::Osc52::CopyPaste,
                         ..Default::default()
                     },
                     &TermSize::default(),
@@ -193,6 +200,8 @@ impl Terminal {
                 awaiting_echo: false,
                 error: None,
                 search: None,
+                clipboard_copy: None,
+                clipboard_paste: None,
             })),
             updates: updates_tx,
             commands: commands.clone(),
@@ -480,6 +489,8 @@ impl Engine {
         std::mem::swap(&mut new.parser, &mut old.parser);
         std::mem::swap(&mut new.graphics, &mut old.graphics);
         new.graphics.allow_files = false;
+        new.clipboard_copy = None;
+        new.clipboard_paste = None;
         // Prefer new observations; retain the last directory only for unchanged metadata.
         let same_environment = new.environment == old.environment;
         let directory = new.shell.directory.take();
@@ -684,7 +695,31 @@ impl Engine {
                     drop(core);
                     let _ = self.commands.try_send(Command::Input(text.into_bytes()));
                 }
-                // OSC 52 has no implicit access to the system clipboard.
+                Event::ClipboardStore(kind, text) => {
+                    if kind == alacritty_terminal::term::ClipboardType::Clipboard
+                        && text.len() <= CLIPBOARD_LIMIT
+                        && !text.contains('\0')
+                    {
+                        self.core
+                            .lock()
+                            .expect("terminal state lock poisoned")
+                            .clipboard_copy = Some(text);
+                    }
+                }
+                Event::ClipboardLoad(kind, format) => {
+                    let mut core = self.core.lock().expect("terminal state lock poisoned");
+                    let prompt = kind == alacritty_terminal::term::ClipboardType::Clipboard
+                        && core.clipboard_paste.is_none();
+                    if prompt {
+                        core.clipboard_paste = Some(format);
+                    } else {
+                        let sequence = format("");
+                        drop(core);
+                        let _ = self
+                            .commands
+                            .try_send(Command::Input(sequence.into_bytes()));
+                    }
+                }
                 _ => {}
             }
         }
@@ -697,39 +732,68 @@ impl Engine {
         let offset = content.display_offset as i32;
         let rows = core.term.screen_lines();
         let columns = core.term.columns();
-        let cells = content
-            .display_iter
-            .filter_map(|indexed| {
-                let row = indexed.point.line.0 + offset;
-                if row < 0 || row as usize >= rows {
-                    return None;
+        let mut cells = Vec::new();
+        let mut tiles = Vec::new();
+        let mut placeholders = placeholders::Row::default();
+        let mut previous_row = None;
+        let placeholders_active = core.graphics.has_placeholder();
+        for indexed in content.display_iter {
+            let row = indexed.point.line.0 + offset;
+            if row < 0 || row as usize >= rows {
+                continue;
+            }
+            let selected = content
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selection.contains(indexed.point));
+            let mut cell = indexed.cell.clone();
+            if placeholders_active {
+                let marks = indexed.cell.zerowidth().unwrap_or(&[]);
+                let changed = previous_row != Some(row);
+                previous_row = Some(row);
+                if let Some(located) = placeholders.observe(
+                    indexed.point.column.0,
+                    changed,
+                    indexed.cell.c,
+                    marks,
+                    color_number(indexed.cell.fg),
+                    indexed
+                        .cell
+                        .underline_color()
+                        .and_then(color_number)
+                        .unwrap_or(0),
+                ) && let Some(tile) = core.graphics.placeholder_tile(
+                    located.image,
+                    located.placement,
+                    located.image_column,
+                    located.image_row,
+                    indexed.point.column.0,
+                    row as usize,
+                ) {
+                    tiles.push(tile);
+                    cell.clear_wide();
                 }
-                let selected = content
-                    .selection
-                    .as_ref()
-                    .is_some_and(|selection| selection.contains(indexed.point));
-                let mut cell = indexed.cell.clone();
-                // Resolve dynamic OSC colors while the borrowed color table is available.
-                for color in [&mut cell.fg, &mut cell.bg] {
-                    let index = match *color {
-                        Color::Indexed(i) => Some(usize::from(i)),
-                        Color::Named(n) => Some(n as usize),
-                        Color::Spec(_) => None,
-                    };
-                    if let Some(index) = index
-                        && let Some(value) = content.colors[index]
-                    {
-                        *color = Color::Spec(value);
-                    }
+            }
+            // Resolve dynamic OSC colors while the borrowed color table is available.
+            for color in [&mut cell.fg, &mut cell.bg] {
+                let index = match *color {
+                    Color::Indexed(i) => Some(usize::from(i)),
+                    Color::Named(n) => Some(n as usize),
+                    Color::Spec(_) => None,
+                };
+                if let Some(index) = index
+                    && let Some(value) = content.colors[index]
+                {
+                    *color = Color::Spec(value);
                 }
-                Some(DisplayCell {
-                    column: indexed.point.column.0,
-                    row: row as usize,
-                    cell,
-                    selected,
-                })
-            })
-            .collect();
+            }
+            cells.push(DisplayCell {
+                column: indexed.point.column.0,
+                row: row as usize,
+                cell,
+                selected,
+            });
+        }
         let cursor_row = content.cursor.point.line.0 + offset;
         let cursor = (content.mode.contains(TermMode::SHOW_CURSOR)
             && cursor_row >= 0
@@ -738,10 +802,14 @@ impl Engine {
         Snapshot {
             transfer: core.zmodem.status(),
             cells,
-            images: core.graphics.snapshot(
-                content.display_offset,
-                content.mode.contains(TermMode::ALT_SCREEN),
-            ),
+            images: {
+                let mut images = core.graphics.snapshot(
+                    content.display_offset,
+                    content.mode.contains(TermMode::ALT_SCREEN),
+                );
+                images.extend(merge_placeholder_runs(tiles));
+                images
+            },
             directory: core.shell.directory.clone(),
             directory_target: core.shell.target.clone(),
             cursor,
@@ -754,6 +822,43 @@ impl Engine {
             error: core.error.clone(),
             rows,
             columns,
+        }
+    }
+
+    pub fn take_clipboard_copy(&self) -> Option<String> {
+        self.core
+            .lock()
+            .expect("terminal state lock poisoned")
+            .clipboard_copy
+            .take()
+    }
+
+    pub fn clipboard_paste_pending(&self) -> bool {
+        self.core
+            .lock()
+            .expect("terminal state lock poisoned")
+            .clipboard_paste
+            .is_some()
+    }
+
+    pub fn answer_clipboard_paste(&self, text: Option<&str>) {
+        let sequence = {
+            let mut core = self.core.lock().expect("terminal state lock poisoned");
+            let Some(format) = core.clipboard_paste.take() else {
+                return;
+            };
+            let text = text.unwrap_or("");
+            let end = text.len().min(CLIPBOARD_LIMIT);
+            let end = (0..=end)
+                .rev()
+                .find(|index| text.is_char_boundary(*index))
+                .unwrap_or(0);
+            format(&text[..end])
+        };
+        if sequence.len() <= MAX_INPUT {
+            let _ = self
+                .commands
+                .try_send(Command::Input(sequence.into_bytes()));
         }
     }
 
@@ -1158,6 +1263,41 @@ pub fn resolve_color(color: Color, palette: Palette, foreground: bool) -> u32 {
     }
 }
 
+fn color_number(color: Color) -> Option<u32> {
+    match color {
+        Color::Indexed(index) => Some(u32::from(index)),
+        Color::Spec(color) => {
+            Some((u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b))
+        }
+        Color::Named(_) => None,
+    }
+}
+
+fn merge_placeholder_runs(mut tiles: Vec<graphics::DisplayImage>) -> Vec<graphics::DisplayImage> {
+    tiles.sort_by(|left, right| {
+        left.row
+            .total_cmp(&right.row)
+            .then(left.column.total_cmp(&right.column))
+    });
+    let mut merged: Vec<graphics::DisplayImage> = Vec::new();
+    for tile in tiles {
+        if let Some(last) = merged.last_mut()
+            && last.image.id == tile.image.id
+            && (last.row - tile.row).abs() < 0.01
+            && (last.column + last.columns - tile.column).abs() < 0.01
+            && (last.crop[1] - tile.crop[1]).abs() < 0.01
+            && (last.crop[3] - tile.crop[3]).abs() < 0.01
+            && (last.crop[0] + last.crop[2] - tile.crop[0]).abs() < 0.01
+        {
+            last.columns += tile.columns;
+            last.crop[2] += tile.crop[2];
+            continue;
+        }
+        merged.push(tile);
+    }
+    merged
+}
+
 pub fn cell_text(cell: &Cell) -> String {
     if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
         return String::new();
@@ -1286,6 +1426,28 @@ fn visible_prompt(core: &Core) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn osc52_copies_text_and_paste_waits_for_an_explicit_answer() -> Result<()> {
+        let (terminal, input) = Terminal::channel(&Preferences::default(), "clipboard".into());
+        terminal.engine.feed(b"\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(
+            terminal.engine.take_clipboard_copy().as_deref(),
+            Some("hello")
+        );
+        terminal.engine.feed(b"\x1b]52;c;?\x07");
+        assert!(terminal.engine.clipboard_paste_pending());
+        terminal.engine.answer_clipboard_paste(None);
+        let response = input.try_recv()?;
+        let Command::Input(bytes) = response else {
+            panic!("paste denial must answer the terminal");
+        };
+        let text = String::from_utf8(bytes)?;
+        assert!(text.starts_with("\u{1b}]52;c;"));
+        assert!(!text.contains("hello"));
+        assert!(!terminal.engine.clipboard_paste_pending());
+        Ok(())
+    }
 
     #[test]
     fn cursor_home_and_prompt_redraw_do_not_make_existing_input_empty() -> Result<()> {

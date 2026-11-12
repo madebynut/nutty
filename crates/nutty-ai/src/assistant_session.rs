@@ -65,12 +65,18 @@ impl Entry {
                     "命令语言与当前终端 Shell 不匹配，已阻止发送"
                 );
                 ensure!(
-                    environment.supports_posix_commands(),
+                    environment.supports_posix_commands()
+                        || environment.supports_powershell_commands(),
                     "当前 Shell 暂不支持只读自动发送"
                 );
-                let command = crate::command::prepare_read_only(&proposed.text)?;
+                let command = if environment.supports_powershell_commands() {
+                    crate::command::prepare_powershell_read_only(&proposed.text)?
+                } else {
+                    crate::command::prepare_read_only(&proposed.text)?
+                };
                 ensure!(
-                    !(environment.shell_is("fish") && command.contains("\"$0\"")),
+                    environment.supports_powershell_commands()
+                        || !(environment.shell_is("fish") && command.contains("\"$0\"")),
                     "当前 Shell 不支持 $0，请手动调整命令"
                 );
                 match state {

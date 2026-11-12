@@ -31,6 +31,7 @@ pub(crate) enum PaneEvent {
     Focused,
     Input(Vec<u8>),
     Paste(String),
+    ClipboardPaste,
 }
 
 struct CachedRow {
@@ -132,6 +133,7 @@ pub(crate) struct TerminalView {
     search_status: String,
     scroll_remainder: f32,
     blink_epoch: Instant,
+    paste_prompted: bool,
     _cursor_refresh: Task<()>,
     _refresh: Task<()>,
     _search_subscription: Subscription,
@@ -140,6 +142,10 @@ pub(crate) struct TerminalView {
 impl EventEmitter<PaneEvent> for TerminalView {}
 
 impl TerminalView {
+    pub(crate) fn finish_clipboard_prompt(&mut self) {
+        self.paste_prompted = false;
+    }
+
     pub fn new(
         terminal: Terminal,
         preferences: Preferences,
@@ -156,6 +162,17 @@ impl TerminalView {
                 if view
                     .update(cx, |view, cx| {
                         view.snapshot = view.terminal.engine.snapshot();
+                        if let Some(text) = view.terminal.engine.take_clipboard_copy() {
+                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+                        }
+                        if view.terminal.engine.clipboard_paste_pending() {
+                            if !view.paste_prompted {
+                                view.paste_prompted = true;
+                                cx.emit(PaneEvent::ClipboardPaste);
+                            }
+                        } else {
+                            view.paste_prompted = false;
+                        }
                         if view.terminal.engine.zmodem_prefix_pending() {
                             // A trailing handshake prefix must not delay regular frame updates.
                             cx.spawn(async move |view, cx| {
@@ -229,6 +246,7 @@ impl TerminalView {
             search_status: String::new(),
             scroll_remainder: 0.,
             blink_epoch: Instant::now(),
+            paste_prompted: false,
             _cursor_refresh: cursor_refresh,
             _refresh: refresh,
             _search_subscription: search_subscription,
@@ -274,6 +292,9 @@ impl TerminalView {
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.paste_prompted {
+            return;
+        }
         if !self.marked.is_empty() {
             return;
         }

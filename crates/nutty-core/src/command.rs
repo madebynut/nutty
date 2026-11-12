@@ -344,6 +344,162 @@ pub fn quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
+/// PowerShell-only read-only form. Input is parsed by the same literal pipeline as POSIX,
+/// then rewritten to module-qualified cmdlets so aliases and functions cannot intercept it.
+pub fn prepare_powershell_read_only(command: &str) -> Result<String, AutomaticRejection> {
+    validate(command).map_err(|_| AutomaticRejection::Syntax)?;
+    let parts = literal_pipeline(command).ok_or(AutomaticRejection::Syntax)?;
+    let mut output = Vec::new();
+    for (words, operator) in parts {
+        if words.iter().any(|word| matches!(word, Word::ShellName)) {
+            return Err(AutomaticRejection::Syntax);
+        }
+        let literals: Option<Vec<String>> = words
+            .iter()
+            .map(|word| word.literal().map(str::to_owned))
+            .collect();
+        let literals = literals.ok_or(AutomaticRejection::Syntax)?;
+        let program = literals
+            .first()
+            .ok_or(AutomaticRejection::Syntax)?
+            .to_ascii_lowercase();
+        let compiled = powershell_stage(&program, &literals[1..])
+            .ok_or(AutomaticRejection::UnsupportedStage(program))?;
+        output.push(compiled);
+        if let Some(operator) = operator {
+            if operator != "|" && operator != ";" {
+                return Err(AutomaticRejection::Syntax);
+            }
+            output.push(operator);
+        }
+    }
+    Ok(output.join(" "))
+}
+
+fn quote_powershell(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "''"))
+}
+
+fn emit_powershell(command: &str, arguments: &[String]) -> String {
+    let mut output = vec![command.to_owned()];
+    let mut expect_number = false;
+    for argument in arguments {
+        let lower = argument.to_ascii_lowercase();
+        if expect_number && powershell_number(argument) {
+            output.push(argument.clone());
+            expect_number = false;
+            continue;
+        }
+        expect_number = false;
+        if [
+            "-name",
+            "-file",
+            "-directory",
+            "-force",
+            "-hidden",
+            "-path",
+            "-literalpath",
+            "-totalcount",
+            "-tail",
+        ]
+        .contains(&lower.as_str())
+        {
+            output.push(argument.clone());
+            expect_number = matches!(lower.as_str(), "-totalcount" | "-tail");
+        } else {
+            output.push(quote_powershell(argument));
+        }
+    }
+    output.join(" ")
+}
+
+fn powershell_number(value: &str) -> bool {
+    value
+        .parse::<u32>()
+        .is_ok_and(|value| (1..=10_000).contains(&value))
+}
+
+fn powershell_stage(program: &str, arguments: &[String]) -> Option<String> {
+    if arguments
+        .iter()
+        .any(|argument| argument.contains([',', ';', '|', '`', '$', '(', ')']))
+    {
+        return None;
+    }
+    match program {
+        "pwd" | "gl" | "get-location" if arguments.is_empty() => {
+            Some("Microsoft.PowerShell.Management\\Get-Location".into())
+        }
+        "get-date" if arguments.is_empty() => Some("Microsoft.PowerShell.Utility\\Get-Date".into()),
+        "whoami" if arguments.is_empty() => Some("& 'C:\\Windows\\System32\\whoami.exe'".into()),
+        "hostname" if arguments.is_empty() => {
+            Some("& 'C:\\Windows\\System32\\hostname.exe'".into())
+        }
+        "echo" | "write-output" if arguments.iter().all(|argument| !argument.starts_with('-')) => {
+            Some(emit_powershell(
+                "Microsoft.PowerShell.Utility\\Write-Output",
+                arguments,
+            ))
+        }
+        "ls" | "dir" | "gci" | "get-childitem" if powershell_child(arguments) => Some(
+            emit_powershell("Microsoft.PowerShell.Management\\Get-ChildItem", arguments),
+        ),
+        "cat" | "gc" | "type" | "get-content" => powershell_content(arguments),
+        _ => None,
+    }
+}
+
+fn powershell_child(arguments: &[String]) -> bool {
+    let mut words = arguments.iter();
+    while let Some(argument) = words.next() {
+        let lower = argument.to_ascii_lowercase();
+        if ["-literalpath", "-path"].contains(&lower.as_str()) {
+            if words.next().is_none_or(|value| value.starts_with('-')) {
+                return false;
+            }
+        } else if argument.starts_with('-')
+            && !["-name", "-file", "-directory", "-force", "-hidden"].contains(&lower.as_str())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn powershell_content(arguments: &[String]) -> Option<String> {
+    let mut words = arguments.iter();
+    let mut bounded = false;
+    let mut has_path = false;
+    while let Some(argument) = words.next() {
+        let lower = argument.to_ascii_lowercase();
+        if ["-totalcount", "-tail"].contains(&lower.as_str()) {
+            if !words.next().is_some_and(|value| powershell_number(value)) {
+                return None;
+            }
+            bounded = true;
+        } else if ["-path", "-literalpath"].contains(&lower.as_str()) {
+            words.next()?;
+            has_path = true;
+        } else if argument.starts_with('-') {
+            return None;
+        } else {
+            has_path = true;
+        }
+    }
+    if !has_path {
+        return None;
+    }
+    let mut arguments = arguments.to_vec();
+    if !bounded {
+        arguments.push("-TotalCount".into());
+        arguments.push("200".into());
+    }
+    Some(emit_powershell(
+        "Microsoft.PowerShell.Management\\Get-Content",
+        &arguments,
+    ))
+}
+
 fn bounded_lines(arguments: &[String]) -> bool {
     let mut words = arguments.iter();
     while let Some(word) = words.next() {
@@ -619,6 +775,35 @@ mod tests {
             assert!(
                 automatic_read_only(command).is_none(),
                 "command must require an explicit click: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_read_only_uses_module_qualified_cmdlets() {
+        assert_eq!(
+            prepare_powershell_read_only("pwd").expect("location"),
+            "Microsoft.PowerShell.Management\\Get-Location"
+        );
+        assert_eq!(
+            prepare_powershell_read_only("Get-Content readme.md").expect("content"),
+            "Microsoft.PowerShell.Management\\Get-Content 'readme.md' -TotalCount 200"
+        );
+        assert_eq!(
+            prepare_powershell_read_only("ls -Name docs").expect("listing"),
+            "Microsoft.PowerShell.Management\\Get-ChildItem -Name 'docs'"
+        );
+        assert_eq!(automatic_read_only("pwd"), Some("'/bin/pwd'".into()));
+        for command in [
+            "Remove-Item readme.md",
+            "Get-Content",
+            "pwd $(whoami)",
+            "ls -Recurse",
+            "echo \"$0\"",
+        ] {
+            assert!(
+                prepare_powershell_read_only(command).is_err(),
+                "powershell command must stay manual: {command}"
             );
         }
     }

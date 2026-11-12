@@ -1,4 +1,4 @@
-use super::endpoint::Endpoint;
+use super::endpoint::{Endpoint, LinkKind};
 use super::*;
 use std::path::Path;
 
@@ -227,6 +227,13 @@ async fn recursive_transfer_is_atomic_bounded_and_preserves_links_and_modes() ->
         )
         .await?;
         tokio::fs::symlink("中文/file", src.join("link")).await?;
+        tokio::fs::symlink("中文", src.join("dir-link")).await?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+        symlink_file("中文/file", src.join("link"))?;
+        symlink_dir("中文", src.join("dir-link"))?;
     }
     let mut j = fixture(dir.path(), &src, &dest).await?;
     j.execute(
@@ -250,12 +257,85 @@ async fn recursive_transfer_is_atomic_bounded_and_preserves_links_and_modes() ->
                 & 0o777,
             0o640
         );
+    }
+    #[cfg(any(unix, windows))]
+    {
         assert_eq!(
-            tokio::fs::read_link(dest.join("link")).await?,
-            PathBuf::from("中文/file")
+            Endpoint::Local
+                .read_link(dest.join("link").to_str().context("path")?)
+                .await?,
+            "中文/file"
+        );
+        assert_eq!(
+            Endpoint::Local
+                .read_link(dest.join("dir-link").to_str().context("path")?)
+                .await?,
+            "中文"
         );
     }
     assert!(!dir.path().join(format!(".nutty-{}.part", j.id)).exists());
+    Ok(())
+}
+#[tokio::test]
+async fn symlink_target_kind_follows_directories_files_and_dangling_links() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    tokio::fs::create_dir(root.join("real")).await?;
+    tokio::fs::write(root.join("real/file"), b"x").await?;
+    let root = root.to_str().context("path")?;
+    let join = |name: &str| super::endpoint::join(root, name);
+    let local = Endpoint::Local;
+    local
+        .symlink(&join("file-link"), "real/file", LinkKind::File)
+        .await?;
+    local
+        .symlink(&join("dir-link"), "real", LinkKind::Directory)
+        .await?;
+    local
+        .symlink(&join("dangling"), "missing", LinkKind::File)
+        .await?;
+    local
+        .symlink(&join("via"), "dir-link", LinkKind::File)
+        .await?;
+    assert_eq!(
+        job::link_target_kind(&local, &join("file-link"), "real/file").await?,
+        LinkKind::File
+    );
+    assert_eq!(
+        job::link_target_kind(&local, &join("dir-link"), "real").await?,
+        LinkKind::Directory
+    );
+    assert_eq!(
+        job::link_target_kind(&local, &join("dangling"), "missing").await?,
+        LinkKind::File
+    );
+    assert_eq!(
+        job::link_target_kind(&local, &join("via"), "dir-link").await?,
+        LinkKind::Directory
+    );
+    assert_eq!(local.read_link(&join("dir-link")).await?, "real");
+    Ok(())
+}
+#[tokio::test]
+async fn reload_accepts_local_absolute_paths_and_rejects_relative_ones() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join("source.bin");
+    let target = dir.path().join("target.bin");
+    tokio::fs::write(&source, b"x").await?;
+    let mut job = fixture(dir.path(), &source, &target).await?;
+    job.source = Some(source.to_str().context("path")?.into());
+    job.target = Some(target.to_str().context("path")?.into());
+    job.save(dir.path()).await?;
+    let restored = job::read_job(&job.folder(dir.path()).join("task.json")).await?;
+    assert_eq!(restored.source.as_deref(), job.source.as_deref());
+    assert_eq!(restored.target.as_deref(), job.target.as_deref());
+
+    job.target = Some("relative.bin".into());
+    assert!(job.validate().is_err());
+    job.target = Some("/remote/target.bin".into());
+    assert!(job.validate().is_ok());
+    job.source = Some("relative.bin".into());
+    assert!(job.validate().is_err());
     Ok(())
 }
 #[tokio::test]

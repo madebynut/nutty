@@ -18,6 +18,12 @@ pub(super) enum Kind {
     Directory,
     Symlink,
 }
+/// Windows records a directory bit on the symlink itself. Unix and SFTP do not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LinkKind {
+    File,
+    Directory,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct Metadata {
     pub kind: Kind,
@@ -545,11 +551,17 @@ impl Endpoint {
     }
     pub async fn read_link(&self, path: &str) -> Result<String> {
         match self {
-            Self::Local => tokio::fs::read_link(path)
-                .await?
-                .into_os_string()
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("链接目标不是 UTF-8")),
+            Self::Local => {
+                let link = tokio::fs::read_link(path)
+                    .await?
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("链接目标不是 UTF-8"))?;
+                // Windows returns the stored separator. Transfer records use '/'.
+                #[cfg(windows)]
+                let link = link.replace('\\', "/");
+                Ok(link)
+            }
             Self::Remote(s) => {
                 let r = s.readlink(path).await?;
                 ensure!(r.files.len() == 1, "无效链接目标");
@@ -557,12 +569,33 @@ impl Endpoint {
             }
         }
     }
-    pub async fn symlink(&self, path: &str, target: &str) -> Result<()> {
+    pub async fn symlink(
+        &self,
+        path: &str,
+        target: &str,
+        #[cfg_attr(
+            not(windows),
+            expect(
+                unused_variables,
+                reason = "Unix and SFTP symlinks do not record a directory flag"
+            )
+        )]
+        kind: LinkKind,
+    ) -> Result<()> {
         match self {
             Self::Local => {
                 #[cfg(unix)]
                 tokio::fs::symlink(target, path).await?;
-                #[cfg(not(unix))]
+                #[cfg(windows)]
+                {
+                    let path = path.to_owned();
+                    let target = target.to_owned();
+                    tokio::task::spawn_blocking(move || {
+                        create_windows_symlink(&target, &path, matches!(kind, LinkKind::Directory))
+                    })
+                    .await??;
+                }
+                #[cfg(not(any(unix, windows)))]
                 bail!("此平台尚不支持恢复符号链接");
             }
             Self::Remote(s) => {
@@ -658,6 +691,26 @@ pub(super) fn relative(path: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+#[cfg(windows)]
+fn create_windows_symlink(target: &str, path: &str, directory: bool) -> Result<()> {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+    /// `ERROR_PRIVILEGE_NOT_HELD` from `CreateSymbolicLinkW`.
+    const PRIVILEGE_NOT_HELD: i32 = 1314;
+    let created = if directory {
+        symlink_dir(target, path)
+    } else {
+        symlink_file(target, path)
+    };
+    created.map_err(|error| {
+        if error.raw_os_error() == Some(PRIVILEGE_NOT_HELD) {
+            anyhow::anyhow!(
+                "Windows 未允许创建符号链接。请开启开发人员模式，或以管理员身份运行后重试"
+            )
+        } else {
+            error.into()
+        }
+    })
 }
 fn rename_exclusive(source: &str, target: &str) -> Result<()> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]

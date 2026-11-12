@@ -6,9 +6,9 @@ Nutty 的 Windows 版本使用原生 GPUI/Direct3D 窗口、ConPTY 和 Windows �
 
 支持 Windows 10 1809 及以上、Windows 11（x86_64）。建议使用仍在微软支持周期内的 Windows 11，并更新显卡驱动。解压 Windows ZIP 后运行 `Nutty.exe`，无需管理员权限。测试版本未作 Authenticode 签名，尚未建立 SmartScreen 信誉。
 
-默认本地终端为 Windows PowerShell。设置中可选择已安装的 PowerShell 7、cmd.exe 等 Shell；PowerShell 自动保留用户 profile/提示符，并发送目录与命令边界。cmd.exe 可以交互及使用命令发送器，但不具备 PowerShell 的命令边界集成。
+默认本地终端为 Windows PowerShell。设置中可选择已安装的 PowerShell 7、cmd.exe 等 Shell；PowerShell 自动保留用户 profile/提示符，并发送目录与命令边界。cmd.exe 启动时发送目录和命令边界；自定义 `PROMPT` 只在不含 `%&|<>^"` 等特殊字符时保留，否则使用 `$P$G`。
 
-本地 Windows 会话会向 AI 传递 Windows 和当前 Shell 信息；远程 SSH 会话根据远端系统生成指令。Windows 本地的 AI 命令当前支持点击执行，自动只读发送仍使用经过审核的 POSIX 白名单，不会把该白名单套用到 PowerShell。
+本地 Windows 会话会向 AI 传递 Windows 和当前 Shell 信息；远程 SSH 会话根据远端系统生成指令。Windows 本地的 AI 命令支持点击执行。PowerShell 的只读自动发送使用独立 cmdlet 白名单，并改写成模块限定名；cmd 不自动发送。POSIX 白名单不会套用到 PowerShell。
 
 ## SSH、Agent 与文件
 
