@@ -2,80 +2,23 @@
   <img src="assets/Nutty.png" alt="Nutty 坚果终端 Logo" width="128" height="128" />
   <h1>Nutty · 坚果终端</h1>
   <p><strong>终端、远程文件与 AI 运维助手，在同一个原生工作区。</strong></p>
-  <p>简洁的黑白坚果，装下日常运维的每一步。</p>
   <p>
-    <a href="https://github.com/madebynut/nutty/actions/workflows/ci.yml"><img src="https://github.com/madebynut/nutty/actions/workflows/ci.yml/badge.svg" alt="Linux CI" /></a>
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-52525B?style=flat-square" alt="macOS, Windows, and Linux" />
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-52525B?style=flat-square" alt="MIT License" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-52525B?style=flat-square" alt="Apache License 2.0" /></a>
   </p>
-  <p><a href="#特性">特性</a> · <a href="#从源码构建">从源码构建</a> · <a href="#开始使用">开始使用</a></p>
 </div>
 
----
-
-Nutty 是使用 Rust 构建的桌面终端。GPUI 绘制界面，Alacritty 解析终端，russh 处理 SSH/SFTP，Rig 接入模型。本地终端、SSH、文件传输和 AI 助手在同一工作区里切换。
+Nutty 是使用 Rust 构建的桌面终端。GPUI 绘制界面，Alacritty 解析终端，russh 处理 SSH/SFTP，Rig 接入模型。
 
 ## 特性
 
-### 一个舒适的终端工作区
+- **终端**：macOS、Windows、Linux 本地会话和 SSH；标签与嵌套分屏、广播、搜索；命令历史和目录跟随；中英文字体、光标与主题。
+- **图像**：Kitty、Sixel、iTerm 与 Zmodem。单边不超过 4096 像素，不使用共享内存。
+- **连接**：密码、私钥、证书、SSH Agent、键盘交互和主机指纹确认；多跳、HTTP CONNECT / SOCKS5、保活与端口转发。可导入 OpenSSH 配置和加密备份。
+- **文件**：SFTP 浏览、预览、编辑和权限管理。传输队列支持限速、暂停续传、失败重试和同名冲突处理。
+- **AI**：OpenAI、DeepSeek、Anthropic、Gemini、Ollama 及兼容接口；通过 ACP 接入 Cursor、Codex、Claude Code、Gemini CLI、OpenCode。支持 MCP 与 Skills。只读自动发送使用命令白名单，不满足条件时改为手动执行。
 
-- **本地 + 远程**：macOS PTY、Windows ConPTY、Linux PTY，以及原生 SSH 会话。
-- **标签与嵌套分屏**：左右/上下分屏、拖动尺寸、广播、搜索、清屏；重启恢复工作区布局。
-- **贴合日常输入**：Tab 交给 Shell 补全；命令发送器支持复杂、多行命令，草稿随窗格保留。
-- **目录与历史跟随**：状态栏展示当前完整目录，右栏按窗格显示命令历史；关闭窗格即清理其会话历史。
-- **可调的阅读体验**：界面、终端、Agent 的中英文字体独立设置；搜索系统字体，调整行高、字距、内边距、光标与主题。
-- **终端内图像**：Kitty 直接图像、文件图像、临时文件和 Unicode 占位符，以及 Sixel、iTerm 图像协议和 Zmodem。单边不超过 4096 像素，不使用共享内存。
-
-### 认真处理每一次连接与传输
-
-- **完整的常用认证**：密码、私钥/证书、SSH Agent、键盘交互认证与主机指纹确认。
-- **复杂网络可配置**：多跳连接、HTTP CONNECT / SOCKS5 代理、保活与重连、本地/远程/动态端口转发。
-- **连接管理**：分组、搜索、编辑、删除、独立测试、在线状态；导入 OpenSSH 配置和加密备份。
-- **SFTP 文件工作区**：独立连接配置、目录浏览、书签、预览/编辑、新建、重命名、权限与删除。
-- **有状态的传输队列**：并发与限速、递归目录、暂停/续传、失败重试、重启恢复，以及同名冲突处理。
-- **谨慎写入**：临时文件分阶段传输、发布前校验、常规文件原子替换；JumpServer 目标可绑定独立 SFTP 主机。
-
-### AI 是当前终端的助手
-
-- **多提供方**：OpenAI、DeepSeek、Anthropic、Gemini、Ollama，以及兼容接口；自动获取模型、手动补充、推理选项与连接测试。
-- **外部 Agent**：通过 ACP 接入 Cursor、Codex、Claude Code、Gemini CLI、OpenCode 等；发现本地 CLI，按 Agent 实际能力加载模型与配置。
-- **贴近当前会话**：提示包含该窗格的平台和 Shell，用于诊断与执行。
-- **执行就在代码块内**：点击发送命令，显示已发送状态并允许重发；支持显式启用只读自动发送与终端上下文。
-- **会话边界明确**：每窗格独立、可重置；关闭窗格取消对应 AI 请求与 Agent 进程。
-- **MCP + Skills**：配置 stdio/HTTP 工具，展示并确认工具调用；从系统文件选择器导入 Skills。
-
-只读自动发送有严格的命令白名单和空提示符检查；受限 Shell 或不满足条件时保留手动执行。第三方 Agent 的模型、认证和功能以其 ACP 实现为准。
-
-## 从源码构建
-
-使用 Rust stable，工具链要求见 `Cargo.toml`。macOS 需要 Xcode Command Line Tools；Windows 需要 Visual Studio C++ 工具链及 Windows SDK。协议测试使用 Python 3.11+。
-
-```sh
-git clone https://github.com/madebynut/nutty.git
-cd nutty
-cargo run --locked --bin Nutty
-```
-
-```sh
-# macOS 应用包
-sh scripts/bundle-macos.sh release
-```
-
-```powershell
-# Windows 便携包
-./scripts/bundle-windows.ps1 release
-```
-
-```sh
-# Linux x86_64 归档，需在 Linux x86_64 上执行
-sh scripts/bundle-linux.sh release
-```
-
-## 开始使用
-
-运行后打开本地终端，或新建 SSH 连接。设置里选择字体、主题、Shell 和 AI 提供方。在当前窗格切换 **Shell / Agent**，展开命令发送器或 AI 输入区。
-
-### 常用快捷键
+## 常用快捷键
 
 | 操作 | macOS | Windows / Linux |
 | --- | --- | --- |
@@ -86,31 +29,30 @@ sh scripts/bundle-linux.sh release
 | 命令面板 | `⌘K` | `Ctrl+Shift+K` |
 | 设置 | `⌘,` | `Ctrl+Shift+,` |
 
-验证代码：
+## 从源码构建
+
+使用 Rust stable，工具链要求见 `Cargo.toml`。
 
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-targets --all-features --locked
-cargo doc --workspace --no-deps --locked
+git clone https://github.com/madebynut/nutty.git
+cd nutty
+cargo run --locked --bin Nutty
 ```
 
-`NUTTY_DATA_DIR` 可指定隔离配置目录；`Nutty --help` 与 `Nutty --benchmark` 用于本地诊断。
+```sh
+sh scripts/bundle-macos.sh release
+```
 
-## 架构
+```powershell
+./scripts/bundle-windows.ps1 release
+```
 
-| 模块 | 职责 |
-| --- | --- |
-| `nutty` | 原生窗口、布局、输入、设置与渲染 |
-| `nutty-core` | 配置、凭据、工作区、平台信息与共享模型 |
-| `nutty-terminal` | 终端解析、PTY、Shell 集成、历史与图像协议 |
-| `nutty-ssh` | SSH、多跳、端口转发、SFTP 与传输恢复 |
-| `nutty-ai` | 提供方、AI 会话、ACP、MCP 与 Skills |
+```sh
+sh scripts/bundle-linux.sh release
+```
 
-滚动历史、图像缓存、传输队列和模型上下文都有容量上限，后台网络任务可以取消。
+## 许可
 
-## 许可与致谢
+[Apache License 2.0](LICENSE) · madebynut
 
-[MIT License](LICENSE) · madebynut
-
-感谢 [GPUI Kit](https://github.com/longbridge/gpui-kit)、[Alacritty](https://github.com/alacritty/alacritty)、[russh](https://github.com/Eugeny/russh)、[Rig](https://github.com/0xPlaygrounds/rig) 及其他开源项目。依赖保留各自的许可与著作权。
+依赖保留各自的许可与著作权。

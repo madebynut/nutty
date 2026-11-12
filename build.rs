@@ -26,7 +26,7 @@ fn main() {
             .set("FileDescription", "Nutty")
             .set("OriginalFilename", "Nutty.exe")
             .set("InternalName", "Nutty")
-            .set("LegalCopyright", "Copyright © 2026 madebynut. MIT License.")
+            .set("LegalCopyright", "Copyright © 2026 madebynut. Apache License 2.0.")
             .compile()
             .expect("compile Windows application resources");
     }

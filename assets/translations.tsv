@@ -149,7 +149,7 @@ Streamable HTTP 地址	Streamable HTTP endpoint
 清空屏幕	Clear screen
 滚动历史最多为 100000 行	Scrollback is limited to 100,000 lines
 滚动历史行数	Scrollback lines
-独立设计与实现 · MIT License	Independently designed and implemented · MIT License
+独立设计与实现 · Apache License 2.0	Independently designed and implemented · Apache License 2.0
 环境变量 · JSON 对象，保存在钥匙串，留空保留	Environment · JSON object; stored in keychain; blank keeps existing values
 环境变量必须是 JSON 字符串对象	Environment must be a JSON object of strings
 用户名	Username

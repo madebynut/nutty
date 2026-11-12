@@ -598,7 +598,7 @@ impl WorkspaceView {
                     env!("CARGO_PKG_VERSION")
                 )))
                 .child("Rust · GPUI Kit · Alacritty · russh · rig")
-                .child(crate::i18n::text("独立设计与实现 · MIT License"))
+                .child(crate::i18n::text("独立设计与实现 · Apache License 2.0"))
                 .child(div().text_size(px(11.)).text_color(rgb(p.muted)).child(
                     crate::i18n::localize(format!("配置目录：{}", self.store.directory.display())),
                 )),
