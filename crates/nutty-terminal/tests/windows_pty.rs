@@ -36,11 +36,12 @@ fn powershell_tracks_directories_history_unicode_and_isolates_panes() -> Result<
         rows: 30,
         columns: 100,
     })?;
-    first.engine.input(
-        "Set-Location -LiteralPath '.\\中文 directory'\r"
-            .as_bytes()
-            .to_vec(),
-    )?;
+    // Type, let the line echo, then press Enter, as a user does: history records the
+    // prompt line as it is shown when Enter is pressed.
+    let command = "Set-Location -LiteralPath '.\\中文 directory'";
+    first.engine.input(command.as_bytes().to_vec())?;
+    wait(&first.engine, || first.engine.recent_output().contains(command))?;
+    first.engine.input(b"\r".to_vec())?;
     wait(&first.engine, || {
         first
             .engine
