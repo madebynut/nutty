@@ -2271,7 +2271,7 @@ impl WorkspaceView {
         }
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_sidebar(&self, traffic_lights: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette();
         let width = self.sidebar.extent(self.sidebar_limit(PanelEdge::Left));
         let compact = width < 225.;
@@ -2298,7 +2298,7 @@ impl WorkspaceView {
                     .border_color(rgb(p.border))
                     // The title is centred in the space between the traffic lights and
                     // the new connection button.
-                    .when(cfg!(target_os = "macos"), |header| {
+                    .when(traffic_lights, |header| {
                         header.pl(px(activity_bar::TRAFFIC_LIGHT_END))
                     })
                     .child(
@@ -3256,6 +3256,7 @@ impl Render for WorkspaceView {
             self.modal_focus.focus(window, cx);
         }
         let p = self.palette();
+        let traffic_lights = activity_bar::traffic_lights(window);
         let active_layout = self
             .tabs
             .iter()
@@ -3443,10 +3444,10 @@ impl Render for WorkspaceView {
                         cx.entity().downgrade(),
                         None,
                     ))
-                    .child(self.render_activity_bar(cx))
+                    .child(self.render_activity_bar(traffic_lights, cx))
                     .children(
                         (self.sidebar.extent(self.sidebar_limit(PanelEdge::Left)) > 0.)
-                            .then(|| self.render_sidebar(cx)),
+                            .then(|| self.render_sidebar(traffic_lights, cx)),
                     )
                     .child(
                         div()
@@ -3466,7 +3467,7 @@ impl Render for WorkspaceView {
                                     .bg(rgb(p.sidebar))
                                     .px_2()
                                     .when(
-                                        cfg!(target_os = "macos")
+                                        traffic_lights
                                             && self
                                                 .sidebar
                                                 .extent(self.sidebar_limit(PanelEdge::Left))

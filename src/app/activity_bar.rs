@@ -29,12 +29,20 @@ const TRAFFIC_LIGHTS: f32 = TRAFFIC_LIGHT_INSET + 54. + 16.;
 /// clears the traffic lights, which extend past the bar.
 pub(super) const TRAFFIC_LIGHT_OVERHANG: f32 = TRAFFIC_LIGHTS - ACTIVITY_BAR;
 const ITEM: f32 = 40.;
+/// Logo in the title strip while full screen hides the traffic lights.
+const LOGO: f32 = 30.;
 
 /// Marks jump hosts in the activity bar, the jump host list and route previews.
 pub(super) const JUMP_HOST_ICON: IconName = IconName::Waypoints;
 
 type ClickHandler = Box<dyn Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App)>;
 const REVEAL: Duration = Duration::from_millis(160);
+
+/// Whether the macOS traffic lights occupy the window's top-left corner. macOS
+/// hides them in full screen, where the corner shows the application logo instead.
+pub(super) fn traffic_lights(window: &Window) -> bool {
+    cfg!(target_os = "macos") && !window.is_fullscreen()
+}
 
 impl WorkspaceView {
     /// Shows or hides the sidebar; opening it plays the slide-in.
@@ -78,7 +86,11 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    pub(super) fn render_activity_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_activity_bar(
+        &self,
+        traffic_lights: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let p = self.palette();
         let sidebar_open = self.sidebar.extent(self.sidebar_limit(PanelEdge::Left)) > 0.;
         let showing = |role| sidebar_open && self.sidebar_role == role;
@@ -183,14 +195,25 @@ impl WorkspaceView {
             // On macOS the traffic lights sit in a title strip that spans the activity
             // bar and the panel next to it; the strip ends in the same divider as the
             // sidebar header and the tab bar, and the column border starts below it.
+            // In full screen the lights are gone and the strip shows the logo.
             .when(cfg!(target_os = "macos"), |bar| {
                 bar.child(
                     div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .h(px(panels::HEADER_BAR))
                         .flex_shrink_0()
                         .bg(rgb(p.sidebar))
                         .border_b_1()
-                        .border_color(rgb(p.border)),
+                        .border_color(rgb(p.border))
+                        .when(!traffic_lights, |strip| {
+                            strip.child(
+                                gpui_kit::img(crate::branding::WORKSPACE_LOGO)
+                                    .size(px(LOGO))
+                                    .flex_shrink_0(),
+                            )
+                        }),
                 )
             })
             .child(items)
