@@ -12,6 +12,7 @@ use gpui_kit::{
 
 use super::{PanelEdge, WorkspaceView, panels};
 use crate::config::ConnectionRole;
+use crate::theme::Palette;
 
 /// Width of the fixed column at the window's left edge.
 pub(super) const ACTIVITY_BAR: f32 = 48.;
@@ -30,7 +31,7 @@ const TRAFFIC_LIGHTS: f32 = TRAFFIC_LIGHT_INSET + 54. + 16.;
 pub(super) const TRAFFIC_LIGHT_OVERHANG: f32 = TRAFFIC_LIGHTS - ACTIVITY_BAR;
 const ITEM: f32 = 40.;
 /// Logo in the title strip while full screen hides the traffic lights.
-const LOGO: f32 = 30.;
+const LOGO: f32 = 26.;
 
 /// Marks jump hosts in the activity bar, the jump host list and route previews.
 pub(super) const JUMP_HOST_ICON: IconName = IconName::Waypoints;
@@ -42,6 +43,29 @@ const REVEAL: Duration = Duration::from_millis(160);
 /// hides them in full screen, where the corner shows the application logo instead.
 pub(super) fn traffic_lights(window: &Window) -> bool {
     cfg!(target_os = "macos") && !window.is_fullscreen()
+}
+
+/// Whether the logo sits in the window's top-left corner instead of beside the
+/// sidebar title: only on macOS in full screen, where the traffic lights were.
+pub(super) fn corner_logo(traffic_lights: bool) -> bool {
+    cfg!(target_os = "macos") && !traffic_lights
+}
+
+/// The application logo: the acorn mark on a rounded tile, both in theme colours
+/// (the tile in the accent, the acorn in the window background).
+pub(super) fn logo(size: f32, p: Palette) -> gpui_kit::Div {
+    // Nutty.svg rounds its 896-unit tile with a 128-unit radius.
+    div()
+        .flex_shrink_0()
+        .size(px(size))
+        .rounded(px(size * 128. / 896.))
+        .bg(rgb(p.accent))
+        .child(
+            gpui_kit::svg()
+                .path(crate::branding::LOGO_MARK)
+                .size_full()
+                .text_color(rgb(p.base)),
+        )
 }
 
 impl WorkspaceView {
@@ -207,13 +231,7 @@ impl WorkspaceView {
                         .bg(rgb(p.sidebar))
                         .border_b_1()
                         .border_color(rgb(p.border))
-                        .when(!traffic_lights, |strip| {
-                            strip.child(
-                                gpui_kit::img(crate::branding::WORKSPACE_LOGO)
-                                    .size(px(LOGO))
-                                    .flex_shrink_0(),
-                            )
-                        }),
+                        .when(!traffic_lights, |strip| strip.child(logo(LOGO, p))),
                 )
             })
             .child(items)

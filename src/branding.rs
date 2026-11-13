@@ -16,6 +16,8 @@ pub(crate) fn prepare_launch() -> anyhow::Result<()> {
 }
 
 pub(crate) const WORKSPACE_LOGO: &str = "nutty/workspace-logo.png";
+/// The acorn alone, as a single-colour mask the interface tints to its theme.
+pub(crate) const LOGO_MARK: &str = "nutty/logo-mark.svg";
 
 pub(crate) struct Assets;
 
@@ -47,10 +49,14 @@ pub(crate) fn register_application() {
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        // The image loader caches these resources; rendering never reads the source tree.
         if path == WORKSPACE_LOGO {
-            // The image loader caches this resource; rendering never reads the source tree.
             Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/Nutty-workspace.png"
+            ))))
+        } else if path == LOGO_MARK {
+            Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/Nutty-mark.svg"
             ))))
         } else {
             gpui_kit::assets::AllAssets.load(path)
@@ -59,8 +65,10 @@ impl AssetSource for Assets {
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
         let mut assets = gpui_kit::assets::AllAssets.list(path)?;
-        if WORKSPACE_LOGO.starts_with(path) {
-            assets.push(WORKSPACE_LOGO.into());
+        for asset in [WORKSPACE_LOGO, LOGO_MARK] {
+            if asset.starts_with(path) {
+                assets.push(asset.into());
+            }
         }
         Ok(assets)
     }

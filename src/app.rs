@@ -2310,11 +2310,12 @@ impl WorkspaceView {
                             .gap_2()
                             .min_w_0()
                             .overflow_hidden()
-                            .children((!compact).then(|| {
-                                Icon::new(IconName::Terminal)
-                                    .size_5()
-                                    .text_color(rgb(p.accent))
-                            }))
+                            // In full screen the logo moves to the corner the traffic
+                            // lights leave, and comes back beside the title after.
+                            .children(
+                                (!compact && !activity_bar::corner_logo(traffic_lights))
+                                    .then(|| activity_bar::logo(20., p)),
+                            )
                             .child(
                                 div()
                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
