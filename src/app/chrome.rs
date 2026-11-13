@@ -73,7 +73,7 @@ impl WorkspaceView {
                 self.close_pane(id, window, cx);
             }
         } else if action.is::<crate::ToggleSidebar>() {
-            self.sidebar.toggle();
+            self.toggle_sidebar();
             cx.notify();
         } else if action.is::<crate::OpenFiles>() {
             self.switch_tool(Tool::Files, cx);

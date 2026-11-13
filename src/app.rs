@@ -36,6 +36,7 @@ use crate::{
     workspace::{Axis, Layout},
 };
 
+mod activity_bar;
 mod agent_settings;
 mod assistant;
 mod authentication;
@@ -374,6 +375,8 @@ pub(crate) struct WorkspaceView {
     active_pane: Option<Uuid>,
     connecting: connection_attempts::ConnectionAttempts,
     sidebar: PanelSize,
+    /// Increments each time the sidebar is opened, replaying its slide-in.
+    sidebar_reveal: u64,
     collapsed_connection_groups: HashSet<Option<String>>,
     tool_size: PanelSize,
     panel_bounds: PanelBounds,
@@ -578,6 +581,7 @@ impl WorkspaceView {
             active_pane: None,
             connecting: Default::default(),
             sidebar: PanelSize::sidebar(238.),
+            sidebar_reveal: 0,
             collapsed_connection_groups: HashSet::new(),
             tool_size: PanelSize::sidebar(340.),
             panel_bounds: Default::default(),
@@ -2251,154 +2255,124 @@ impl WorkspaceView {
         let compact = width < 225.;
         let stacked = cfg!(target_os = "macos") && width < 196.;
         let query = self.filter.read(cx).value().to_string();
-        div()
-            .flex()
-            .flex_col()
-            .relative()
-            .w(px(self.sidebar.extent(self.sidebar_limit(PanelEdge::Left))))
-            .min_h_0()
-            .overflow_hidden()
-            .flex_shrink_0()
-            .text_size(px(self.store.profile.preferences.ui_font_size.max(14.)))
-            .bg(rgb(p.sidebar))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(panels::HEADER_BAR + if stacked { 32. } else { 0. }))
-                    .flex_shrink_0()
-                    .px_3()
-                    .when(stacked, |header| header.pt(px(32.)))
-                    .when(cfg!(target_os = "macos") && !stacked, |header| {
-                        header.pl(px(82.))
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .min_w_0()
-                            .children((!compact).then(|| {
-                                Icon::new(IconName::Terminal)
-                                    .size_5()
-                                    .text_color(rgb(p.accent))
-                            }))
-                            .child(
-                                div()
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .text_size(px(if compact { 16. } else { 18. }))
-                                    .text_ellipsis()
-                                    .child("Nutty"),
-                            ),
-                    )
-                    .child(
-                        icon_button(
-                            "new-connection",
-                            IconName::Plus,
-                            crate::i18n::text("新建连接"),
+        let sidebar =
+            div()
+                .flex()
+                .flex_col()
+                .relative()
+                .w(px(width))
+                .min_h_0()
+                .overflow_hidden()
+                .flex_shrink_0()
+                .text_size(px(self.store.profile.preferences.ui_font_size.max(14.)))
+                .bg(rgb(p.sidebar))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .h(px(panels::HEADER_BAR + if stacked { 32. } else { 0. }))
+                        .flex_shrink_0()
+                        .px_3()
+                        .when(stacked, |header| header.pt(px(32.)))
+                        .when(cfg!(target_os = "macos") && !stacked, |header| {
+                            header.pl(px(activity_bar::TRAFFIC_LIGHT_OVERHANG))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .min_w_0()
+                                .children((!compact).then(|| {
+                                    Icon::new(IconName::Terminal)
+                                        .size_5()
+                                        .text_color(rgb(p.accent))
+                                }))
+                                .child(
+                                    div()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .text_size(px(if compact { 16. } else { 18. }))
+                                        .text_ellipsis()
+                                        .child("Nutty"),
+                                ),
                         )
-                        .on_click(
-                            cx.listener(|view, _, window, cx| {
-                                view.connection_form(None, window, cx)
-                            }),
+                        .child(
+                            icon_button(
+                                "new-connection",
+                                IconName::Plus,
+                                crate::i18n::text("新建连接"),
+                            )
+                            .on_click(cx.listener(
+                                |view, _, window, cx| view.connection_form(None, window, cx),
+                            )),
                         ),
-                    ),
-            )
-            .child(
-                div()
-                    .px_3()
-                    .pb_3()
-                    .child(crate::controls::input(&self.filter, cx).w_full()),
-            )
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .text_size(px(
-                        (self.store.profile.preferences.ui_font_size - 2.).max(12.)
-                    ))
-                    .text_color(rgb(p.muted))
-                    .child(crate::i18n::text("工作区")),
-            )
-            .child(
-                div()
-                    .id("local-session")
-                    .mx_2()
-                    .px_3()
-                    .py_3()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(p.hover)))
-                    .on_click(cx.listener(|view, _, window, cx| view.local(None, window, cx)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                Icon::new(IconName::SquareTerminal)
-                                    .size_5()
-                                    .text_color(rgb(p.accent)),
-                            )
-                            .child(crate::i18n::text("本地终端")),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_4()
-                    .pt_5()
-                    .pb_2()
-                    .text_size(px(
-                        (self.store.profile.preferences.ui_font_size - 2.).max(12.)
-                    ))
-                    .text_color(rgb(p.muted))
-                    .child(crate::i18n::text("连接"))
-                    .child(self.store.profile.connections.len().to_string()),
-            )
-            .child(
-                div()
-                    .id("connection-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px_2()
-                    .children(self.render_connection_groups(&query, cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .flex_shrink_0()
-                    .h(px(panels::FOOTER_BAR))
-                    .px_3()
-                    .border_t_1()
-                    .border_color(rgb(p.border))
-                    .child(
-                        crate::controls::button("settings")
-                            .ghost()
-                            .accessibility_label(crate::i18n::text("设置"))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .w_full()
-                                    .justify_center()
-                                    .child(Icon::new(IconName::Settings2).size_5())
-                                    .child(crate::i18n::text("设置")),
-                            )
-                            .w_full()
-                            .on_click(
-                                cx.listener(|view, _, window, cx| view.settings_form(window, cx)),
-                            ),
-                    ),
-            )
-            .child(panels::handle("sidebar-resize".into(), PanelEdge::Left))
-            .into_any_element()
+                )
+                .child(
+                    div()
+                        .px_3()
+                        .pb_3()
+                        .child(crate::controls::input(&self.filter, cx).w_full()),
+                )
+                .child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .text_size(px(
+                            (self.store.profile.preferences.ui_font_size - 2.).max(12.)
+                        ))
+                        .text_color(rgb(p.muted))
+                        .child(crate::i18n::text("工作区")),
+                )
+                .child(
+                    div()
+                        .id("local-session")
+                        .mx_2()
+                        .px_3()
+                        .py_3()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(p.hover)))
+                        .on_click(cx.listener(|view, _, window, cx| view.local(None, window, cx)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    Icon::new(IconName::SquareTerminal)
+                                        .size_5()
+                                        .text_color(rgb(p.accent)),
+                                )
+                                .child(crate::i18n::text("本地终端")),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px_4()
+                        .pt_5()
+                        .pb_2()
+                        .text_size(px(
+                            (self.store.profile.preferences.ui_font_size - 2.).max(12.)
+                        ))
+                        .text_color(rgb(p.muted))
+                        .child(crate::i18n::text("连接"))
+                        .child(self.store.profile.connections.len().to_string()),
+                )
+                .child(
+                    div()
+                        .id("connection-list")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px_2()
+                        .children(self.render_connection_groups(&query, cx)),
+                )
+                .child(panels::handle("sidebar-resize".into(), PanelEdge::Left));
+        self.reveal_sidebar(sidebar, width)
     }
 
     fn render_tool(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -3314,7 +3288,7 @@ impl Render for WorkspaceView {
                 }
             }))
             .on_action(cx.listener(|view, _: &crate::ToggleSidebar, _, cx| {
-                view.sidebar.toggle();
+                view.toggle_sidebar();
                 cx.notify();
             }))
             .on_action(cx.listener(|view, _: &crate::ShellMode, window, cx| {
@@ -3458,6 +3432,7 @@ impl Render for WorkspaceView {
                         cx.entity().downgrade(),
                         None,
                     ))
+                    .child(self.render_activity_bar(cx))
                     .children(
                         (self.sidebar.extent(self.sidebar_limit(PanelEdge::Left)) > 0.)
                             .then(|| self.render_sidebar(cx)),
@@ -3485,22 +3460,9 @@ impl Render for WorkspaceView {
                                                 .sidebar
                                                 .extent(self.sidebar_limit(PanelEdge::Left))
                                                 == 0.,
-                                        |bar| bar.pl(px(82.)),
+                                        |bar| bar.pl(px(activity_bar::TRAFFIC_LIGHT_OVERHANG)),
                                     )
                                     .gap_1()
-                                    .child(
-                                        icon_button(
-                                            "toggle-sidebar",
-                                            IconName::PanelLeft,
-                                            crate::i18n::text("连接导航"),
-                                        )
-                                        .on_click(
-                                            cx.listener(|view, _, _, cx| {
-                                                view.sidebar.toggle();
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    )
                                     .child(
                                         div()
                                             .id("tabs")
