@@ -226,10 +226,34 @@ pub enum ConnectionKind {
     Sftp,
 }
 
+/// Where a saved connection is listed. A jump host can still be opened directly;
+/// the role only decides whether it appears with the connections or the jump hosts.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+pub enum ConnectionRole {
+    #[default]
+    Host,
+    Jump,
+}
+
+/// Lists every connection another connection routes through as a jump host.
+pub fn mark_referenced_jump_hosts(connections: &mut [Connection]) {
+    let referenced: std::collections::HashSet<Uuid> = connections
+        .iter()
+        .filter_map(|connection| connection.jump)
+        .collect();
+    for connection in connections {
+        if referenced.contains(&connection.id) {
+            connection.role = ConnectionRole::Jump;
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Connection {
     #[serde(default)]
     pub kind: ConnectionKind,
+    #[serde(default)]
+    pub role: ConnectionRole,
     #[serde(default = "initial_directory")]
     pub initial_directory: String,
     pub id: Uuid,
@@ -335,6 +359,10 @@ pub struct Profile {
     pub skills_roots: Vec<PathBuf>,
     pub file_bookmarks: Vec<FileBookmark>,
     pub forwards: Vec<crate::forwarding::Rule>,
+    /// Set once connection roles have been assigned. Profiles written before roles
+    /// existed (or saved again by such a version) list their referenced jump hosts
+    /// as jump hosts the next time they are read.
+    pub connection_roles: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -400,6 +428,7 @@ fn load_profile(path: &Path) -> Result<Profile> {
             .push(crate::provider::Provider::legacy(&profile.preferences));
     }
     profile.schema = 1;
+    profile.assign_connection_roles();
     profile.validate()?;
     ensure!(
         profile.preferences.scrollback <= 100_000,
@@ -512,6 +541,14 @@ impl Store {
 }
 
 impl Profile {
+    /// Gives a profile without connection roles the roles its jump routes imply.
+    pub fn assign_connection_roles(&mut self) {
+        if !self.connection_roles {
+            mark_referenced_jump_hosts(&mut self.connections);
+            self.connection_roles = true;
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         self.preferences.terminal.validate()?;
         ensure!(self.forwards.len() <= 128, "最多保存 128 条转发规则");
@@ -1668,6 +1705,7 @@ mod tests {
         store.profile.preferences.font_size = 16.;
         store.profile.connections.push(Connection {
             kind: crate::config::ConnectionKind::Ssh,
+            role: Default::default(),
             initial_directory: ".".into(),
             id: Uuid::nil(),
             name: "Development".into(),

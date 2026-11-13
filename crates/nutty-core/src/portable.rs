@@ -89,7 +89,8 @@ pub fn decrypt(bytes: &[u8], password: &str) -> Result<Archive> {
             )
             .map_err(|_| anyhow::anyhow!("密码错误或备份文件已损坏"))?,
     );
-    let archive: Archive = serde_json::from_slice(&plaintext)?;
+    let mut archive: Archive = serde_json::from_slice(&plaintext)?;
+    archive.profile.assign_connection_roles();
     archive.profile.validate()?;
     validate_secrets(&archive)?;
     Ok(archive)
@@ -548,6 +549,7 @@ pub fn openssh(text: &str, directory: &Path) -> Result<(Vec<Connection>, Vec<Str
         };
         let mut connection = Connection {
             kind: crate::config::ConnectionKind::Ssh,
+            role: Default::default(),
             initial_directory: ".".into(),
             id: identities[&name],
             name: name.clone(),
@@ -631,6 +633,7 @@ pub fn openssh(text: &str, directory: &Path) -> Result<(Vec<Connection>, Vec<Str
         connection.validate()?;
         connections.push(connection);
     }
+    crate::config::mark_referenced_jump_hosts(&mut connections);
     let profile = Profile {
         schema: 1,
         connections: connections.clone(),
@@ -1387,6 +1390,7 @@ mod import_activation_tests {
     fn connection() -> Connection {
         Connection {
             kind: crate::config::ConnectionKind::Ssh,
+            role: Default::default(),
             initial_directory: ".".into(),
             id: Uuid::new_v4(),
             name: "server".into(),

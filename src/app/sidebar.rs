@@ -17,17 +17,24 @@ use gpui_kit::{
 };
 
 use super::{WorkspaceView, icon_button};
-use crate::config::Connection;
+use crate::config::{Connection, ConnectionRole};
 
 struct ConnectionGroup<'a> {
     name: Option<&'a str>,
     connections: Vec<&'a Connection>,
 }
 
-fn connection_groups<'a>(connections: &'a [Connection], query: &str) -> Vec<ConnectionGroup<'a>> {
+fn connection_groups<'a>(
+    connections: &'a [Connection],
+    role: ConnectionRole,
+    query: &str,
+) -> Vec<ConnectionGroup<'a>> {
     let query = query.trim().to_lowercase();
     let mut groups: BTreeMap<Option<&str>, Vec<&Connection>> = BTreeMap::new();
     for connection in connections {
+        if connection.role != role {
+            continue;
+        }
         if !format!(
             "{} {} {}",
             connection.name, connection.host, connection.group
@@ -61,7 +68,8 @@ impl WorkspaceView {
         query: &str,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let groups = connection_groups(&self.store.profile.connections, query);
+        let role = self.sidebar_role;
+        let groups = connection_groups(&self.store.profile.connections, role, query);
         // A successful pane owns this status until it is closed, including hidden tabs.
         // Registry entries, probes and failed opens must never turn a saved row green.
         let connected: HashSet<_> = self
@@ -79,10 +87,18 @@ impl WorkspaceView {
                     .text_size(px(12.))
                     .text_color(rgb(p.muted))
                     .child(crate::i18n::text(
-                        if self.store.profile.connections.is_empty() {
-                            "还没有保存的连接"
-                        } else {
-                            "没有匹配的连接"
+                        match (
+                            role,
+                            self.store
+                                .profile
+                                .connections
+                                .iter()
+                                .any(|connection| connection.role == role),
+                        ) {
+                            (ConnectionRole::Host, false) => "还没有保存的连接",
+                            (ConnectionRole::Host, true) => "没有匹配的连接",
+                            (ConnectionRole::Jump, false) => "还没有保存的跳板机",
+                            (ConnectionRole::Jump, true) => "没有匹配的跳板机",
                         },
                     ))
                     .into_any_element(),
@@ -91,7 +107,7 @@ impl WorkspaceView {
         groups
             .into_iter()
             .map(|group| {
-                let key = group.name.map(str::to_owned);
+                let key = (role, group.name.map(str::to_owned));
                 let expanded = searching || !self.collapsed_connection_groups.contains(&key);
                 let label = group.name.unwrap_or_else(|| crate::i18n::text("未分组"));
                 let group_id = format!("connection-group-{key:?}");
@@ -209,11 +225,14 @@ impl WorkspaceView {
                             )
                             .into_any_element()
                     } else {
-                        Icon::new(IconName::Server)
-                            .size_5()
-                            .flex_shrink_0()
-                            .text_color(rgb(if connected { p.success } else { p.muted }))
-                            .into_any_element()
+                        Icon::new(match connection.role {
+                            ConnectionRole::Host => IconName::Server,
+                            ConnectionRole::Jump => super::activity_bar::JUMP_HOST_ICON,
+                        })
+                        .size_5()
+                        .flex_shrink_0()
+                        .text_color(rgb(if connected { p.success } else { p.muted }))
+                        .into_any_element()
                     })
                     .child(
                         div()
@@ -304,6 +323,7 @@ mod tests {
             port: 22,
             user: "tester".into(),
             kind: ConnectionKind::Ssh,
+            role: Default::default(),
             initial_directory: ".".into(),
             auth: Authentication::Agent,
             ssh: Default::default(),
@@ -320,7 +340,7 @@ mod tests {
             connection("db", "three.test", "Work"),
             connection("named", "four.test", "未分组"),
         ];
-        let groups = connection_groups(&connections, "");
+        let groups = connection_groups(&connections, ConnectionRole::Host, "");
         assert_eq!(groups.len(), 3);
         assert_eq!(groups[0].name, Some("Work"));
         assert_eq!(
@@ -343,16 +363,16 @@ mod tests {
             connection("Database", "db.test", "Production"),
             connection("Sandbox", "sandbox.test", "Lab"),
         ];
-        let group = connection_groups(&connections, " PRODUCTION ");
+        let group = connection_groups(&connections, ConnectionRole::Host, " PRODUCTION ");
         assert_eq!(group.len(), 1);
         assert_eq!(group[0].connections.len(), 2);
-        let name = connection_groups(&connections, " api ");
+        let name = connection_groups(&connections, ConnectionRole::Host, " api ");
         assert_eq!(name.len(), 1);
         assert_eq!(name[0].connections[0].id, connections[0].id);
-        let host = connection_groups(&connections, "DB.TEST");
+        let host = connection_groups(&connections, ConnectionRole::Host, "DB.TEST");
         assert_eq!(host.len(), 1);
         assert_eq!(host[0].connections[0].id, connections[1].id);
-        assert!(connection_groups(&connections, "missing").is_empty());
+        assert!(connection_groups(&connections, ConnectionRole::Host, "missing").is_empty());
     }
 
     #[test]
@@ -360,12 +380,12 @@ mod tests {
         let mut connections = vec![connection("api", "app.test", "Old")];
         let id = connections[0].id;
         connections[0].group = "New".into();
-        let groups = connection_groups(&connections, "");
+        let groups = connection_groups(&connections, ConnectionRole::Host, "");
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].name, Some("New"));
         assert_eq!(groups[0].connections[0].id, id);
         connections[0].group.clear();
-        let groups = connection_groups(&connections, "");
+        let groups = connection_groups(&connections, ConnectionRole::Host, "");
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].name, None);
         assert_eq!(groups[0].connections[0].id, id);

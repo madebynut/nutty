@@ -1,6 +1,7 @@
 //! Reusable jump-host drafts, complete route previews and isolated connection probes.
 
 use super::*;
+use crate::config::ConnectionRole;
 use crate::ssh_options::Category;
 use gpui_kit::SharedString;
 use gpui_kit::component::checkbox::Checkbox;
@@ -254,6 +255,21 @@ impl WorkspaceView {
             refresh_proxy_choices(&mut draft.form, &self.store.profile, current, window, cx);
         }
     }
+    /// Opens an empty connection form whose result is listed under `role`.
+    pub(super) fn new_connection(
+        &mut self,
+        role: ConnectionRole,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.connection_form(None, window, cx);
+        if let Some(form) = &mut self.form
+            && form.editing.is_none()
+        {
+            form.connection_role = role;
+        }
+    }
+
     pub(super) fn connection_form(
         &mut self,
         editing: Option<Uuid>,
@@ -325,6 +341,7 @@ impl WorkspaceView {
         if let Some(saved) = saved {
             form.id = saved.id;
             form.connection_kind = saved.kind;
+            form.connection_role = saved.role;
             form.fields["initial_directory"].update(cx, |input, cx| {
                 input.set_value(saved.initial_directory.clone(), window, cx)
             });
@@ -431,6 +448,7 @@ impl WorkspaceView {
             .flatten();
         let connection = Connection {
             kind: form.connection_kind,
+            role: form.connection_role,
             initial_directory: form.value("initial_directory", cx),
             id: form.id,
             name: form.value("name", cx),
@@ -628,15 +646,9 @@ impl WorkspaceView {
                 form,
                 select_saved: editing.is_none(),
             });
-            self.connection_form(editing, window, cx);
-            // New jump hosts start in their own group so they list apart from the
-            // hosts they route to; the field stays editable.
-            if editing.is_none()
-                && let Some(form) = &self.form
-            {
-                form.fields["group"].update(cx, |input, cx| {
-                    input.set_value(crate::i18n::text("跳板机"), window, cx)
-                });
+            match editing {
+                Some(_) => self.connection_form(editing, window, cx),
+                None => self.new_connection(ConnectionRole::Jump, window, cx),
             }
         }
     }
@@ -871,7 +883,24 @@ impl WorkspaceView {
                                 cx,
                             ))),
                     )
-                    .child(form.field("user", crate::i18n::text("用户名"), cx)),
+                    .child(form.field("user", crate::i18n::text("用户名"), cx))
+                    .child(
+                        Checkbox::new("connection-role-jump")
+                            .cursor_pointer()
+                            .label(crate::i18n::text("用作跳板机，显示在跳板机列表中"))
+                            .checked(form.connection_role == ConnectionRole::Jump)
+                            .disabled(saving || testing)
+                            .on_click(cx.listener(|view, checked: &bool, _, cx| {
+                                if let Some(form) = &mut view.form {
+                                    form.connection_role = if *checked {
+                                        ConnectionRole::Jump
+                                    } else {
+                                        ConnectionRole::Host
+                                    };
+                                }
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(
                 section("身份认证", "目标主机和每台跳板机使用各自的认证信息", p)
@@ -999,7 +1028,7 @@ impl WorkspaceView {
                                     .text_color(rgb(p.muted))
                                     .child(format!("{}", index + 1)),
                             )
-                            .child(Icon::new(IconName::Network).size_4())
+                            .child(Icon::new(super::activity_bar::JUMP_HOST_ICON).size_4())
                             .child(
                                 div()
                                     .flex_1()
@@ -1519,6 +1548,7 @@ mod tests {
             user: "test".into(),
             group: String::new(),
             kind: crate::config::ConnectionKind::Ssh,
+            role: Default::default(),
             initial_directory: ".".into(),
             auth: Authentication::Agent,
             ssh: Default::default(),
@@ -1586,6 +1616,7 @@ mod tests {
         let third = Uuid::new_v4();
         let connection = |id, jump| Connection {
             kind: crate::config::ConnectionKind::Ssh,
+            role: Default::default(),
             initial_directory: ".".into(),
             id,
             name: id.to_string(),

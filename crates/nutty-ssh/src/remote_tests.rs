@@ -555,6 +555,7 @@ impl server::Handler for EchoHandler {
 fn connection(server: &TestServer, key: PathBuf, id: u128, jump: Option<Uuid>) -> Connection {
     Connection {
         kind: crate::config::ConnectionKind::Ssh,
+        role: Default::default(),
         initial_directory: ".".into(),
         id: Uuid::from_u128(id),
         name: format!("test-{id}"),
@@ -1308,6 +1309,7 @@ async fn handshake_timeout_and_probe_cancellation_leave_no_shared_nodes() -> Res
     let registry = Arc::new(Registry::new(directory.path(), prompts));
     let connection = Connection {
         kind: crate::config::ConnectionKind::Ssh,
+        role: Default::default(),
         initial_directory: ".".into(),
         id: Uuid::new_v4(),
         name: "silent SSH server".into(),

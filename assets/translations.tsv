@@ -1006,3 +1006,7 @@ OSC 52 写入，常见于远端 tmux、vim；读取剪贴板始终询问	OSC 52 
 查看新版本 {}	View Nutty {}
 检查新版本	Check for updates
 启动时向 GitHub 查询一次是否有新版本，不发送任何个人信息	Ask GitHub once at startup whether a newer release exists. No personal information is sent
+用作跳板机，显示在跳板机列表中	Use as a jump host and list it under jump hosts
+还没有保存的跳板机	No saved jump hosts yet
+没有匹配的跳板机	No matching jump hosts
+新建跳板机	New jump host

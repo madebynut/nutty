@@ -1578,6 +1578,7 @@ mod tests {
         let b = Uuid::from_u128(2);
         let connection = |id, jump| Connection {
             kind: crate::config::ConnectionKind::Ssh,
+            role: Default::default(),
             initial_directory: ".".into(),
             id,
             name: "node".into(),

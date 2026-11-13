@@ -1,15 +1,17 @@
 //! VS Code style activity bar: a fixed narrow column that opens a local terminal,
-//! the connection sidebar and settings.
+//! the connection and jump host sidebars, and settings.
 
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{Icon, button::ButtonVariants as _};
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, Context, IntoElement, div, prelude::*, px, rgb,
+    Animation, AnimationExt as _, AnyElement, Context, IntoElement, Window, div, prelude::*, px,
+    rgb,
 };
 
 use super::{PanelEdge, WorkspaceView, panels};
+use crate::config::ConnectionRole;
 
 /// Width of the fixed column at the window's left edge.
 pub(super) const ACTIVITY_BAR: f32 = 48.;
@@ -25,16 +27,34 @@ const TRAFFIC_LIGHTS: f32 = TRAFFIC_LIGHT_INSET + 54. + 16.;
 pub(super) const TRAFFIC_LIGHT_OVERHANG: f32 = TRAFFIC_LIGHTS - ACTIVITY_BAR;
 const ITEM: f32 = 40.;
 
+/// Marks jump hosts in the activity bar, the jump host list and route previews.
+pub(super) const JUMP_HOST_ICON: IconName = IconName::Waypoints;
+
 type ClickHandler = Box<dyn Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App)>;
 const REVEAL: Duration = Duration::from_millis(160);
 
 impl WorkspaceView {
-    /// Shows or hides the connection sidebar; opening it plays the slide-in.
+    /// Shows or hides the sidebar; opening it plays the slide-in.
     pub(super) fn toggle_sidebar(&mut self) {
         self.sidebar.toggle();
         if self.sidebar.open {
             self.sidebar_reveal = self.sidebar_reveal.wrapping_add(1);
         }
+    }
+
+    /// Activity bar click: an open sidebar switches to `role`'s list, or closes when
+    /// it already shows that list; a closed sidebar opens on it.
+    fn show_sidebar(&mut self, role: ConnectionRole, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar.open && self.sidebar_role != role {
+            self.sidebar_role = role;
+        } else {
+            self.sidebar_role = role;
+            self.toggle_sidebar();
+            if !self.sidebar.open {
+                self.focus_terminal(window, cx);
+            }
+        }
+        cx.notify();
     }
 
     /// Wraps the sidebar so it slides in from the activity bar after being opened.
@@ -57,7 +77,8 @@ impl WorkspaceView {
 
     pub(super) fn render_activity_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette();
-        let connections_open = self.sidebar.extent(self.sidebar_limit(PanelEdge::Left)) > 0.;
+        let sidebar_open = self.sidebar.extent(self.sidebar_limit(PanelEdge::Left)) > 0.;
+        let showing = |role| sidebar_open && self.sidebar_role == role;
         let item = |id: &'static str,
                     icon: IconName,
                     label: &str,
@@ -125,13 +146,18 @@ impl WorkspaceView {
                         "activity-connections",
                         IconName::Server,
                         crate::i18n::text("连接"),
-                        connections_open,
+                        showing(ConnectionRole::Host),
                         Box::new(cx.listener(|view, _, window, cx| {
-                            view.toggle_sidebar();
-                            if !view.sidebar.open {
-                                view.focus_terminal(window, cx);
-                            }
-                            cx.notify();
+                            view.show_sidebar(ConnectionRole::Host, window, cx)
+                        })),
+                    ))
+                    .child(item(
+                        "activity-jump-hosts",
+                        JUMP_HOST_ICON,
+                        crate::i18n::text("跳板机"),
+                        showing(ConnectionRole::Jump),
+                        Box::new(cx.listener(|view, _, window, cx| {
+                            view.show_sidebar(ConnectionRole::Jump, window, cx)
                         })),
                     )),
             )

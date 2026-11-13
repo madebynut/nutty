@@ -143,6 +143,7 @@ struct Form {
     proxy_ids: Vec<Option<Uuid>>,
     ssh_reconnect: bool,
     connection_kind: crate::config::ConnectionKind,
+    connection_role: crate::config::ConnectionRole,
     preferences: Option<crate::config::Preferences>,
     language: Option<Entity<SelectState<crate::controls::Choices>>>,
     fonts: Option<settings::FontEditor>,
@@ -191,6 +192,7 @@ impl Form {
             proxy_ids: Vec::new(),
             ssh_reconnect: true,
             connection_kind: Default::default(),
+            connection_role: Default::default(),
             preferences: None,
             language: None,
             fonts: None,
@@ -379,7 +381,9 @@ pub(crate) struct WorkspaceView {
     sidebar: PanelSize,
     /// Increments each time the sidebar is opened, replaying its slide-in.
     sidebar_reveal: u64,
-    collapsed_connection_groups: HashSet<Option<String>>,
+    /// Which saved connections the sidebar lists.
+    sidebar_role: crate::config::ConnectionRole,
+    collapsed_connection_groups: HashSet<(crate::config::ConnectionRole, Option<String>)>,
     tool_size: PanelSize,
     panel_bounds: PanelBounds,
     broadcast: bool,
@@ -584,6 +588,7 @@ impl WorkspaceView {
             connecting: Default::default(),
             sidebar: PanelSize::sidebar(238.),
             sidebar_reveal: 0,
+            sidebar_role: Default::default(),
             collapsed_connection_groups: HashSet::new(),
             tool_size: PanelSize::sidebar(340.),
             panel_bounds: Default::default(),
@@ -2255,92 +2260,106 @@ impl WorkspaceView {
         let p = self.palette();
         let width = self.sidebar.extent(self.sidebar_limit(PanelEdge::Left));
         let compact = width < 225.;
+        let role = self.sidebar_role;
         let query = self.filter.read(cx).value().to_string();
-        let sidebar =
-            div()
-                .flex()
-                .flex_col()
-                .relative()
-                .w(px(width))
-                .min_h_0()
-                .overflow_hidden()
-                .flex_shrink_0()
-                .text_size(px(self.store.profile.preferences.ui_font_size.max(14.)))
-                .bg(rgb(p.sidebar))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .h(px(panels::HEADER_BAR))
-                        .flex_shrink_0()
-                        .px_3()
-                        .border_b_1()
-                        .border_color(rgb(p.border))
-                        .when(cfg!(target_os = "macos"), |header| {
-                            header.pl(px(activity_bar::TRAFFIC_LIGHT_OVERHANG))
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .min_w_0()
-                                .children((!compact).then(|| {
-                                    Icon::new(IconName::Terminal)
-                                        .size(px(24.))
-                                        .text_color(rgb(p.accent))
-                                }))
-                                .child(
-                                    div()
-                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                        .text_size(px(if compact { 16. } else { 18. }))
-                                        .text_ellipsis()
-                                        .child("Nutty"),
-                                ),
+        let sidebar = div()
+            .flex()
+            .flex_col()
+            .relative()
+            .w(px(width))
+            .min_h_0()
+            .overflow_hidden()
+            .flex_shrink_0()
+            .text_size(px(self.store.profile.preferences.ui_font_size.max(14.)))
+            .bg(rgb(p.sidebar))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(panels::HEADER_BAR))
+                    .flex_shrink_0()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(rgb(p.border))
+                    .when(cfg!(target_os = "macos"), |header| {
+                        header.pl(px(activity_bar::TRAFFIC_LIGHT_OVERHANG))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .children((!compact).then(|| {
+                                Icon::new(IconName::Terminal)
+                                    .size_5()
+                                    .text_color(rgb(p.accent))
+                            }))
+                            .child(
+                                div()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .text_size(px(if compact { 16. } else { 18. }))
+                                    .text_ellipsis()
+                                    .child("Nutty"),
+                            ),
+                    )
+                    .child(
+                        icon_button(
+                            "new-connection",
+                            IconName::Plus,
+                            crate::i18n::text(match role {
+                                crate::config::ConnectionRole::Host => "新建连接",
+                                crate::config::ConnectionRole::Jump => "新建跳板机",
+                            }),
                         )
-                        .child(
-                            icon_button(
-                                "new-connection",
-                                IconName::Plus,
-                                crate::i18n::text("新建连接"),
-                            )
-                            .on_click(cx.listener(
-                                |view, _, window, cx| view.connection_form(None, window, cx),
-                            )),
-                        ),
-                )
-                .child(
-                    div()
-                        .px_3()
-                        .pt_3()
-                        .pb_2()
-                        .child(crate::controls::input(&self.filter, cx).w_full()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px_4()
-                        .py_2()
-                        .text_size(px(
-                            (self.store.profile.preferences.ui_font_size - 2.).max(12.)
-                        ))
-                        .text_color(rgb(p.muted))
-                        .child(crate::i18n::text("工作区"))
-                        .child(self.store.profile.connections.len().to_string()),
-                )
-                .child(
-                    div()
-                        .id("connection-list")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .px_2()
-                        .children(self.render_connection_groups(&query, cx)),
-                )
-                .child(panels::handle("sidebar-resize".into(), PanelEdge::Left));
+                        .on_click(cx.listener(
+                            move |view, _, window, cx| view.new_connection(role, window, cx),
+                        )),
+                    ),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .pt_3()
+                    .pb_2()
+                    .child(crate::controls::input(&self.filter, cx).w_full()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_4()
+                    .py_2()
+                    .text_size(px(
+                        (self.store.profile.preferences.ui_font_size - 2.).max(12.)
+                    ))
+                    .text_color(rgb(p.muted))
+                    .child(crate::i18n::text(match role {
+                        crate::config::ConnectionRole::Host => "工作区",
+                        crate::config::ConnectionRole::Jump => "跳板机",
+                    }))
+                    .child(
+                        self.store
+                            .profile
+                            .connections
+                            .iter()
+                            .filter(|connection| connection.role == role)
+                            .count()
+                            .to_string(),
+                    ),
+            )
+            .child(
+                div()
+                    .id("connection-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_2()
+                    .children(self.render_connection_groups(&query, cx)),
+            )
+            .child(panels::handle("sidebar-resize".into(), PanelEdge::Left));
         self.reveal_sidebar(sidebar, width)
     }
 
@@ -3102,7 +3121,11 @@ impl WorkspaceView {
                                 .border_b_1()
                                 .border_color(rgb(p.border))
                                 .child(div().text_size(px(17.)).child(
-                                    if modal == Modal::Connection && !self.jump_drafts.is_empty() {
+                                    if modal == Modal::Connection
+                                        && (!self.jump_drafts.is_empty()
+                                            || form.connection_role
+                                                == crate::config::ConnectionRole::Jump)
+                                    {
                                         crate::i18n::text("跳板机设置")
                                     } else if modal == Modal::Connection {
                                         crate::i18n::text("连接设置")
