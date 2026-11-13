@@ -65,9 +65,10 @@ fn powershell_tracks_directories_history_unicode_and_isolates_panes() -> Result<
             .engine
             .automatic_command_ready(first.engine.snapshot().automation_revision)
     })?;
-    first
-        .engine
-        .send_command("[Console]::WriteLine('NUTTY_' + 'WINDOWS_中文')")?;
+    // .NET writes with the console code page; CI runners use 437, which has no CJK.
+    first.engine.send_command(
+        "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::WriteLine('NUTTY_' + 'WINDOWS_中文')",
+    )?;
     wait(&first.engine, || {
         first.engine.recent_output().contains("NUTTY_WINDOWS_中文")
     })?;
