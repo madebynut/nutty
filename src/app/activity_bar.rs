@@ -51,14 +51,10 @@ pub(super) fn corner_logo(traffic_lights: bool) -> bool {
     cfg!(target_os = "macos") && !traffic_lights
 }
 
-/// The application logo on a transparent background: a white acorn with a black
-/// prompt on dark themes, and the reverse on light ones.
+/// The application logo on a transparent background, in the theme's logo colours
+/// (a white acorn with a black prompt on Graphite, the reverse on Light).
 pub(super) fn logo(size: f32, p: Palette) -> gpui_kit::Div {
-    let (acorn, prompt) = if dark(p.base) {
-        (0xffffff, 0x000000)
-    } else {
-        (0x000000, 0xffffff)
-    };
+    let [acorn, prompt] = p.logo;
     let layer = |path: &'static str, color: u32| {
         gpui_kit::svg()
             .absolute()
@@ -73,12 +69,6 @@ pub(super) fn logo(size: f32, p: Palette) -> gpui_kit::Div {
         .size(px(size))
         .child(layer(crate::branding::LOGO_MARK, acorn))
         .child(layer(crate::branding::LOGO_PROMPT, prompt))
-}
-
-/// Whether a background colour is dark, by its relative luminance.
-fn dark(color: u32) -> bool {
-    let channel = |shift: u32| ((color >> shift) & 0xff) as f32 / 255.;
-    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0) < 0.5
 }
 
 impl WorkspaceView {
