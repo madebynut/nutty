@@ -135,7 +135,10 @@ fn main() -> anyhow::Result<()> {
                 titlebar: Some(gpui_kit::TitlebarOptions {
                     title: Some("Nutty".into()),
                     appears_transparent: true,
-                    ..Default::default()
+                    traffic_light_position: Some(gpui_kit::point(
+                        px(app::TRAFFIC_LIGHT_INSET),
+                        px(app::TRAFFIC_LIGHT_INSET),
+                    )),
                 }),
                 ..Default::default()
             };

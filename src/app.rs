@@ -56,6 +56,8 @@ mod session_restore;
 mod settings;
 mod sidebar;
 mod transfer_queue;
+
+pub(crate) use activity_bar::TRAFFIC_LIGHT_INSET;
 use assistant::PaneAssistant;
 use chrome::Overlay;
 use integrations::IntegrationEditor;
@@ -2286,7 +2288,7 @@ impl WorkspaceView {
                                 .min_w_0()
                                 .children((!compact).then(|| {
                                     Icon::new(IconName::Terminal)
-                                        .size_5()
+                                        .size(px(24.))
                                         .text_color(rgb(p.accent))
                                 }))
                                 .child(

@@ -13,8 +13,13 @@ use super::{PanelEdge, WorkspaceView, panels};
 
 /// Width of the fixed column at the window's left edge.
 pub(super) const ACTIVITY_BAR: f32 = 48.;
-/// Horizontal space macOS reserves for the traffic lights from the window's left edge.
-const TRAFFIC_LIGHTS: f32 = 82.;
+/// Offset of the macOS close button from the window's top-left corner. The 14 px
+/// buttons then share a centre line with the 48 px header row, and the close button
+/// sits over the centre of the activity bar's icons.
+pub(crate) const TRAFFIC_LIGHT_INSET: f32 = (ACTIVITY_BAR - 14.) / 2.;
+/// Horizontal space reserved for the traffic lights from the window's left edge:
+/// three 14 px buttons with 6 px gaps, plus breathing room before the title.
+const TRAFFIC_LIGHTS: f32 = TRAFFIC_LIGHT_INSET + 54. + 16.;
 /// Extra left padding the first element right of the activity bar needs on macOS so it
 /// clears the traffic lights, which extend past the bar.
 pub(super) const TRAFFIC_LIGHT_OVERHANG: f32 = TRAFFIC_LIGHTS - ACTIVITY_BAR;
