@@ -1,5 +1,5 @@
-//! VS Code style activity bar: a fixed narrow column that opens the connection
-//! sidebar and settings.
+//! VS Code style activity bar: a fixed narrow column that opens a local terminal,
+//! the connection sidebar and settings.
 
 use std::time::Duration;
 
@@ -93,45 +93,71 @@ impl WorkspaceView {
                         .on_click(move |event, window, cx| on_click(event, window, cx)),
                 )
         };
-        div()
-            .id("activity-bar")
+        let items = div()
             .flex()
             .flex_col()
             .items_center()
             .justify_between()
-            .w(px(ACTIVITY_BAR))
-            .flex_shrink_0()
+            .flex_1()
             .min_h_0()
+            .pt_1()
+            .pb_1()
             .bg(rgb(p.base))
             .border_r_1()
             .border_color(rgb(p.border))
-            // The macOS traffic lights sit above the first item.
-            .pt(px(if cfg!(target_os = "macos") {
-                panels::HEADER_BAR
-            } else {
-                4.
-            }))
-            .pb_1()
-            .child(item(
-                "activity-connections",
-                IconName::Server,
-                crate::i18n::text("连接"),
-                connections_open,
-                Box::new(cx.listener(|view, _, window, cx| {
-                    view.toggle_sidebar();
-                    if !view.sidebar.open {
-                        view.focus_terminal(window, cx);
-                    }
-                    cx.notify();
-                })),
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(item(
+                        "activity-local",
+                        IconName::Monitor,
+                        crate::i18n::text("本地终端"),
+                        false,
+                        Box::new(cx.listener(|view, _, window, cx| view.local(None, window, cx))),
+                    ))
+                    .child(item(
+                        "activity-connections",
+                        IconName::Server,
+                        crate::i18n::text("连接"),
+                        connections_open,
+                        Box::new(cx.listener(|view, _, window, cx| {
+                            view.toggle_sidebar();
+                            if !view.sidebar.open {
+                                view.focus_terminal(window, cx);
+                            }
+                            cx.notify();
+                        })),
+                    )),
+            )
             .child(item(
                 "activity-settings",
                 IconName::Settings2,
                 crate::i18n::text("设置"),
                 false,
                 Box::new(cx.listener(|view, _, window, cx| view.settings_form(window, cx))),
-            ))
+            ));
+        div()
+            .id("activity-bar")
+            .flex()
+            .flex_col()
+            .w(px(ACTIVITY_BAR))
+            .flex_shrink_0()
+            .min_h_0()
+            // On macOS the traffic lights sit in a title strip that spans the activity
+            // bar and the panel next to it; the strip ends in the same divider as the
+            // sidebar header and the tab bar, and the column border starts below it.
+            .when(cfg!(target_os = "macos"), |bar| {
+                bar.child(
+                    div()
+                        .h(px(panels::HEADER_BAR))
+                        .flex_shrink_0()
+                        .bg(rgb(p.sidebar))
+                        .border_b_1()
+                        .border_color(rgb(p.border)),
+                )
+            })
+            .child(items)
             .into_any_element()
     }
 }

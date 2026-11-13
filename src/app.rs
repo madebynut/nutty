@@ -2253,7 +2253,6 @@ impl WorkspaceView {
         let p = self.palette();
         let width = self.sidebar.extent(self.sidebar_limit(PanelEdge::Left));
         let compact = width < 225.;
-        let stacked = cfg!(target_os = "macos") && width < 196.;
         let query = self.filter.read(cx).value().to_string();
         let sidebar =
             div()
@@ -2271,11 +2270,12 @@ impl WorkspaceView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .h(px(panels::HEADER_BAR + if stacked { 32. } else { 0. }))
+                        .h(px(panels::HEADER_BAR))
                         .flex_shrink_0()
                         .px_3()
-                        .when(stacked, |header| header.pt(px(32.)))
-                        .when(cfg!(target_os = "macos") && !stacked, |header| {
+                        .border_b_1()
+                        .border_color(rgb(p.border))
+                        .when(cfg!(target_os = "macos"), |header| {
                             header.pl(px(activity_bar::TRAFFIC_LIGHT_OVERHANG))
                         })
                         .child(
@@ -2311,41 +2311,9 @@ impl WorkspaceView {
                 .child(
                     div()
                         .px_3()
-                        .pb_3()
+                        .pt_3()
+                        .pb_2()
                         .child(crate::controls::input(&self.filter, cx).w_full()),
-                )
-                .child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .text_size(px(
-                            (self.store.profile.preferences.ui_font_size - 2.).max(12.)
-                        ))
-                        .text_color(rgb(p.muted))
-                        .child(crate::i18n::text("工作区")),
-                )
-                .child(
-                    div()
-                        .id("local-session")
-                        .mx_2()
-                        .px_3()
-                        .py_3()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(p.hover)))
-                        .on_click(cx.listener(|view, _, window, cx| view.local(None, window, cx)))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    Icon::new(IconName::SquareTerminal)
-                                        .size_5()
-                                        .text_color(rgb(p.accent)),
-                                )
-                                .child(crate::i18n::text("本地终端")),
-                        ),
                 )
                 .child(
                     div()
@@ -2353,13 +2321,12 @@ impl WorkspaceView {
                         .items_center()
                         .justify_between()
                         .px_4()
-                        .pt_5()
-                        .pb_2()
+                        .py_2()
                         .text_size(px(
                             (self.store.profile.preferences.ui_font_size - 2.).max(12.)
                         ))
                         .text_color(rgb(p.muted))
-                        .child(crate::i18n::text("连接"))
+                        .child(crate::i18n::text("工作区"))
                         .child(self.store.profile.connections.len().to_string()),
                 )
                 .child(
