@@ -46,9 +46,10 @@ jobs:
         env:
           RUSTDOCFLAGS: '-D warnings'
         run: cargo doc --workspace --locked --no-deps
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
-        with:
-          tool: cargo-about
+      # Not every runner has a prebuilt cargo-about, and a source build needs the cli feature.
+      - name: Install cargo-about
+        shell: bash
+        run: command -v cargo-about || cargo install --locked cargo-about --features cli
       - name: Package Linux
         run: sh scripts/bundle-linux.sh release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -95,9 +96,10 @@ jobs:
           cache-on-failure: true
       - run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --locked --all-targets --all-features
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
-        with:
-          tool: cargo-about
+      # Not every runner has a prebuilt cargo-about, and a source build needs the cli feature.
+      - name: Install cargo-about
+        shell: bash
+        run: command -v cargo-about || cargo install --locked cargo-about --features cli
       - name: Package Windows
         shell: pwsh
         run: ./scripts/bundle-windows.ps1 release

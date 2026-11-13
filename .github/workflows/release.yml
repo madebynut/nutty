@@ -54,9 +54,10 @@ jobs:
         with:
           key: ${{ matrix.platform }}
           cache-on-failure: true
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
-        with:
-          tool: cargo-about
+      # Not every runner has a prebuilt cargo-about, and a source build needs the cli feature.
+      - name: Install cargo-about
+        shell: bash
+        run: command -v cargo-about || cargo install --locked cargo-about --features cli
       - name: Check package and tag versions
         run: python scripts/check-version.py
       - run: cargo fmt --all --check
