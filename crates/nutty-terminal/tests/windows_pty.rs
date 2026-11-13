@@ -40,7 +40,9 @@ fn powershell_tracks_directories_history_unicode_and_isolates_panes() -> Result<
     // prompt line as it is shown when Enter is pressed.
     let command = "Set-Location -LiteralPath '.\\中文 directory'";
     first.engine.input(command.as_bytes().to_vec())?;
-    wait(&first.engine, || first.engine.recent_output().contains(command))?;
+    wait(&first.engine, || {
+        first.engine.recent_output().contains(command)
+    })?;
     first.engine.input(b"\r".to_vec())?;
     wait(&first.engine, || {
         first
