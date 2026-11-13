@@ -18,6 +18,8 @@ pub(crate) fn prepare_launch() -> anyhow::Result<()> {
 pub(crate) const WORKSPACE_LOGO: &str = "nutty/workspace-logo.png";
 /// The acorn alone, as a single-colour mask the interface tints to its theme.
 pub(crate) const LOGO_MARK: &str = "nutty/logo-mark.svg";
+/// The prompt cut out of [`LOGO_MARK`], tinted in the contrasting colour.
+pub(crate) const LOGO_PROMPT: &str = "nutty/logo-prompt.svg";
 
 pub(crate) struct Assets;
 
@@ -58,6 +60,10 @@ impl AssetSource for Assets {
             Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/Nutty-mark.svg"
             ))))
+        } else if path == LOGO_PROMPT {
+            Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/Nutty-prompt.svg"
+            ))))
         } else {
             gpui_kit::assets::AllAssets.load(path)
         }
@@ -65,7 +71,7 @@ impl AssetSource for Assets {
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
         let mut assets = gpui_kit::assets::AllAssets.list(path)?;
-        for asset in [WORKSPACE_LOGO, LOGO_MARK] {
+        for asset in [WORKSPACE_LOGO, LOGO_MARK, LOGO_PROMPT] {
             if asset.starts_with(path) {
                 assets.push(asset.into());
             }

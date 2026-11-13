@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="644" height="644" viewBox="190 178 644 644" fill="none">
+  <title>Nutty prompt</title>
+  <desc>The terminal prompt from Nutty.svg, on the same canvas as Nutty-mark.svg so the app can fill the mark's cut in a contrasting colour.</desc>
+  <g stroke="#fff" stroke-width="32" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m391 519 80 73-80 73"/>
+    <path d="M552 665h82"/>
+  </g>
+</svg>

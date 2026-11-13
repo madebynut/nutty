@@ -6,7 +6,7 @@ Black rounded tile, white acorn, and a black `>_` cut into the shell. Flat artwo
 
 The terminal mark uses a 32-unit stroke. `Nutty-workspace.png` is a 512 px export embedded in the app for the empty workspace; its decoded RGBA image uses 1 MiB and shares GPUI's image cache.
 
-`Nutty-mark.svg` is the acorn alone with the prompt cut out, cropped to the tile. The app renders it as a single-colour mask on a rounded tile drawn in theme colours, beside the sidebar title and, in macOS full screen, in the window corner. Edit it together with `Nutty.svg`.
+`Nutty-mark.svg` is the acorn alone with the prompt cut out, and `Nutty-prompt.svg` is the prompt on the same canvas; both are cropped to the acorn. The app tints them on a transparent background, a white acorn with a black prompt on dark themes and the reverse on light ones, beside the sidebar title and, in macOS full screen, in the window corner. Edit them together with `Nutty.svg`.
 
 `Nutty.ico` contains seven PNG-backed Windows sizes from 16 to 256 px, with resource ID 1.
 
