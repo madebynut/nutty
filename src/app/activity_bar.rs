@@ -19,8 +19,11 @@ pub(super) const ACTIVITY_BAR: f32 = 48.;
 /// buttons then share a centre line with the 48 px header row, and the close button
 /// sits over the centre of the activity bar's icons.
 pub(crate) const TRAFFIC_LIGHT_INSET: f32 = (ACTIVITY_BAR - 14.) / 2.;
-/// Horizontal space reserved for the traffic lights from the window's left edge:
-/// three 14 px buttons with 6 px gaps, plus breathing room before the title.
+/// Where the traffic lights end, measured from the activity bar's right edge: three
+/// 14 px buttons with 6 px gaps.
+pub(super) const TRAFFIC_LIGHT_END: f32 = TRAFFIC_LIGHT_INSET + 54. - ACTIVITY_BAR;
+/// Horizontal space reserved for the traffic lights from the window's left edge,
+/// with breathing room before the first tab.
 const TRAFFIC_LIGHTS: f32 = TRAFFIC_LIGHT_INSET + 54. + 16.;
 /// Extra left padding the first element right of the activity bar needs on macOS so it
 /// clears the traffic lights, which extend past the bar.
@@ -111,6 +114,8 @@ impl WorkspaceView {
                         .h(px(ITEM))
                         .accessibility_label(label.to_string())
                         .tooltip(label.to_string())
+                        // Beside the column, clear of the traffic lights above it.
+                        .tooltip_placement(gpui_kit::base::Placement::Right)
                         .child(Icon::new(icon).size_5().text_color(rgb(if active {
                             p.text
                         } else {

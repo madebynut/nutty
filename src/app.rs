@@ -450,6 +450,8 @@ pub(crate) struct WorkspaceView {
     forward_target: Entity<InputState>,
     forwards: HashMap<Uuid, forwarding::Running>,
     forward_after_save: Option<Uuid>,
+    /// The save started by the settings page's save button; the page closes once it lands.
+    settings_save: Option<Uuid>,
     _events_task: Task<()>,
     _prompts_task: Task<()>,
     _filter_subscription: Subscription,
@@ -654,6 +656,7 @@ impl WorkspaceView {
             forward_target,
             forwards: HashMap::new(),
             forward_after_save: None,
+            settings_save: None,
             _events_task: events_task,
             _prompts_task: prompts_task,
             _filter_subscription: filter_subscription,
@@ -1303,6 +1306,13 @@ impl WorkspaceView {
                             self.forward_after_save = None;
                             self.start_forward(id, cx);
                         }
+                        if self.settings_save == Some(id) {
+                            self.settings_save = None;
+                            if self.modal == Some(Modal::Settings) {
+                                self.modal = None;
+                                self.form = None;
+                            }
+                        }
                         if let Err(error) = self
                             .transfer_queue
                             .configure(transfer_queue::configuration(&self.store.profile))
@@ -1397,6 +1407,9 @@ impl WorkspaceView {
                         }
                         if self.forward_after_save == Some(id) {
                             self.forward_after_save = None;
+                        }
+                        if self.settings_save == Some(id) {
+                            self.settings_save = None;
                         }
                         self.status = Some(format!("{error:#}"));
                     }
@@ -2035,8 +2048,10 @@ impl WorkspaceView {
             Ok(preferences) => {
                 let mut profile = self.store.profile.clone();
                 profile.preferences = preferences;
-                if let Err(error) = self.persist_profile(Uuid::new_v4(), profile, Vec::new(), cx) {
-                    self.status = Some(error.to_string());
+                let id = Uuid::new_v4();
+                match self.persist_profile(id, profile, Vec::new(), cx) {
+                    Ok(()) => self.settings_save = Some(id),
+                    Err(error) => self.status = Some(error.to_string()),
                 }
             }
             Err(error) => self.status = Some(error.to_string()),
@@ -2276,21 +2291,25 @@ impl WorkspaceView {
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
                     .h(px(panels::HEADER_BAR))
                     .flex_shrink_0()
                     .px_3()
                     .border_b_1()
                     .border_color(rgb(p.border))
+                    // The title is centred in the space between the traffic lights and
+                    // the new connection button.
                     .when(cfg!(target_os = "macos"), |header| {
-                        header.pl(px(activity_bar::TRAFFIC_LIGHT_OVERHANG))
+                        header.pl(px(activity_bar::TRAFFIC_LIGHT_END))
                     })
                     .child(
                         div()
                             .flex()
+                            .flex_1()
+                            .justify_center()
                             .items_center()
                             .gap_2()
                             .min_w_0()
+                            .overflow_hidden()
                             .children((!compact).then(|| {
                                 Icon::new(IconName::Terminal)
                                     .size_5()
