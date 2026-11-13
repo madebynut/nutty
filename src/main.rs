@@ -9,6 +9,8 @@ mod diagnostics;
 mod fonts;
 mod menus;
 mod terminal_view;
+#[cfg(target_os = "macos")]
+mod traffic_lights;
 
 use nutty_ai::{acp, ai, assistant_session, integrations, provider_catalog};
 use nutty_core::{
@@ -143,6 +145,8 @@ fn main() -> anyhow::Result<()> {
                 ..Default::default()
             };
             match gpui_kit::open_window(options, cx, |window, cx| {
+                #[cfg(target_os = "macos")]
+                traffic_lights::install(window);
                 cx.new(|cx| app::WorkspaceView::new(settings, runtime, window, cx))
             }) {
                 Ok((handle, workspace)) => {
