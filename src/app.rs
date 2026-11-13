@@ -763,6 +763,10 @@ impl WorkspaceView {
         theme.list_active = rgb(p.hover).into();
         theme.list_active_border = rgb(p.accent).into();
         theme.selection = rgb(p.hover).into();
+        // Components such as primary buttons draw from the resolved tokens, which
+        // `Theme::change` computed from the stock colours above; re-derive them so
+        // they follow the palette (otherwise primary buttons stay the stock white).
+        theme.tokens = gpui_kit::component::ThemeTokens::from(theme.colors);
     }
 
     fn add_terminal(
