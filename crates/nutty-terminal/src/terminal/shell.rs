@@ -185,6 +185,12 @@ impl Shell {
         self.bootstrap_attempts = self.bootstrap_attempts.saturating_add(1);
     }
 
+    /// Hooks are queued but not typed yet; keeps the prompt probe from racing them
+    /// without counting an attempt (the attempt is counted when they are sent).
+    pub fn integration_deferred(&mut self) {
+        self.bootstrap_started = Some(Instant::now());
+    }
+
     pub fn integration_pending(&self) -> bool {
         self.bootstrap_started.is_some()
     }

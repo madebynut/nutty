@@ -989,6 +989,7 @@ impl Node {
         result
     }
     fn shell_hooks(environment: &crate::session_environment::Environment) -> Option<String> {
+        // Typed as soon as the shell's first prompt has settled; see `HookTiming`.
         let shell = Path::new(environment.startup_shell.as_deref()?)
             .file_name()?
             .to_str()?;
@@ -1002,9 +1003,9 @@ impl Node {
         let (terminal, input) = Terminal::channel(preferences, self.connection.name.clone());
         terminal.engine.set_environment(environment);
         terminal.engine.feed(&output);
-        if let Some(hooks) = hooks {
-            let wire = terminal.engine.remote_integration_started(&hooks);
-            channel.write().data(wire.as_bytes()).await?;
+        let mut hooks = HookTiming::new(hooks, !output.is_empty());
+        if hooks.pending.is_some() {
+            terminal.engine.remote_integration_deferred();
         }
         terminal
             .engine
@@ -1022,19 +1023,32 @@ impl Node {
                             biased;
                             ()=node.cancel.cancelled()=>{normal_exit=true;break;},
                             ()=engine.wait_input_closed()=>{normal_exit=true;break;},
+                            ()=tokio::time::sleep_until(hooks.due()), if hooks.pending.is_some()=>{
+                                if let Some(source) = hooks.pending.take() {
+                                    let wire = engine.remote_integration_started(&source);
+                                    channel.write().data(wire.as_bytes()).await?;
+                                }
+                            },
                             _=integration_tick.tick(), if engine.remote_integration_pending()=>engine.request_directory_tracking(),
                             command=input.recv()=>match command {
-                                Ok(Command::Input(bytes))=>tokio::select! {
-                                    biased;
-                                    ()=node.cancel.cancelled()=>{normal_exit=true;break;},
-                                    ()=engine.wait_input_closed()=>{normal_exit=true;break;},
-                                    result=channel.write().data(bytes.as_slice())=>result?,
+                                Ok(Command::Input(bytes))=>{
+                                    // Typed input never overtakes the queued hooks.
+                                    if let Some(source) = hooks.pending.take() {
+                                        let wire = engine.remote_integration_started(&source);
+                                        channel.write().data(wire.as_bytes()).await?;
+                                    }
+                                    tokio::select! {
+                                        biased;
+                                        ()=node.cancel.cancelled()=>{normal_exit=true;break;},
+                                        ()=engine.wait_input_closed()=>{normal_exit=true;break;},
+                                        result=channel.write().data(bytes.as_slice())=>result?,
+                                    }
                                 },
                                 Ok(Command::Resize(next))=>{size=next;channel.write().window_change(u32::from(size.columns),u32::from(size.rows),0,0).await?;},
                                 Err(_)=>{normal_exit=true;break;},
                             },
                             message=channel.read.wait()=>match message {
-                                Some(ChannelMsg::Data{data})|Some(ChannelMsg::ExtendedData{data,..})=>{engine.feed(&data);engine.request_directory_tracking();},
+                                Some(ChannelMsg::Data{data})|Some(ChannelMsg::ExtendedData{data,..})=>{hooks.output();engine.feed(&data);engine.request_directory_tracking();},
                                 Some(ChannelMsg::ExitStatus{..}|ChannelMsg::ExitSignal{..})=>{normal_exit=true;break;},
                                 Some(ChannelMsg::Eof|ChannelMsg::Close)|None=>break,
                                 _=>{},
@@ -1097,7 +1111,7 @@ impl Node {
                     };
                     let result = tokio::select! {()=node.cancel.cancelled()=>break 'session,()=engine.wait_input_closed()=>break 'session,result=reconnect=>result};
                     match result {
-                        Ok(((next, handle, output), environment, hooks)) => {
+                        Ok(((next, handle, output), environment, next_hooks)) => {
                             channel = next;
                             transport = handle;
                             engine.set_environment(environment);
@@ -1105,12 +1119,9 @@ impl Node {
                                 .set_remote_identity(&node.connection.user, &node.connection.host);
                             engine.resume();
                             engine.feed(&output);
-                            if let Some(hooks) = hooks {
-                                let wire = engine.remote_integration_started(&hooks);
-                                if let Err(error) = channel.write().data(wire.as_bytes()).await {
-                                    engine.fail(format!("SSH Shell 初始化失败：{error:#}"));
-                                    break 'session;
-                                }
+                            hooks = HookTiming::new(next_hooks, !output.is_empty());
+                            if hooks.pending.is_some() {
+                                engine.remote_integration_deferred();
                             }
                             continue 'session;
                         }
@@ -1648,3 +1659,46 @@ mod transfer_tests {
 #[cfg(test)]
 #[path = "remote_tests.rs"]
 mod integration_tests;
+
+/// When to type the shell-integration hooks into a new SSH shell.
+///
+/// Typed input is echoed by the remote terminal as it arrives. Sent before the shell
+/// has printed its first prompt, the echo can be split by that prompt, and the echo
+/// filter then (deliberately) leaves the script on screen. The hooks therefore wait
+/// until output has been quiet briefly, bounded so a silent or chatty login still
+/// gets them, and are sent before any input the user types.
+struct HookTiming {
+    pending: Option<String>,
+    quiet_until: tokio::time::Instant,
+    latest: tokio::time::Instant,
+}
+impl HookTiming {
+    /// Output must pause this long after the prompt before the hooks are typed.
+    const QUIET: Duration = Duration::from_millis(150);
+    /// A shell that has printed nothing yet gets this long to print its prompt.
+    const FIRST_OUTPUT: Duration = Duration::from_secs(2);
+    /// Never wait longer than this in total.
+    const LIMIT: Duration = Duration::from_secs(3);
+
+    fn new(pending: Option<String>, has_output: bool) -> Self {
+        let now = tokio::time::Instant::now();
+        Self {
+            pending,
+            quiet_until: now
+                + if has_output {
+                    Self::QUIET
+                } else {
+                    Self::FIRST_OUTPUT
+                },
+            latest: now + Self::LIMIT,
+        }
+    }
+    fn output(&mut self) {
+        if self.pending.is_some() {
+            self.quiet_until = tokio::time::Instant::now() + Self::QUIET;
+        }
+    }
+    fn due(&self) -> tokio::time::Instant {
+        self.quiet_until.min(self.latest)
+    }
+}

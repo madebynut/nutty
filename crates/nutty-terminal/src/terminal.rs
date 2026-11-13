@@ -333,6 +333,16 @@ impl Engine {
         core.shell.input_pending = false;
     }
 
+    /// Marks shell hooks as queued for a new SSH shell before they are typed, so the
+    /// prompt probe does not send its own bootstrap in the meantime.
+    pub fn remote_integration_deferred(&self) {
+        self.core
+            .lock()
+            .expect("terminal state lock poisoned")
+            .shell
+            .integration_deferred();
+    }
+
     /// Prevents a second bootstrap from racing the hooks queued with a new SSH shell.
     pub fn remote_integration_started(&self, source: &str) -> String {
         let mut core = self.core.lock().expect("terminal state lock poisoned");
