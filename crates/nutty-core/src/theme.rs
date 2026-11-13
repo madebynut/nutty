@@ -13,6 +13,10 @@ pub struct Palette {
     pub muted: u32,
     pub accent: u32,
     pub success: u32,
+    /// Errors and destructive actions.
+    pub danger: u32,
+    /// Cautions such as exposed listeners or import warnings.
+    pub warning: u32,
     pub terminal: u32,
     /// Application logo on a transparent background: the acorn, then the prompt cut into it.
     pub logo: [u32; 2],
@@ -32,6 +36,8 @@ impl Palette {
                 muted: 0x858c9e,
                 accent: 0xb7a3ff,
                 success: 0x86d9b1,
+                danger: 0xf17c82,
+                warning: 0xe7b567,
                 terminal: 0x101216,
                 logo: [0xffffff, 0x000000],
                 ansi: [
@@ -49,6 +55,8 @@ impl Palette {
                 muted: 0x788193,
                 accent: 0x7358ce,
                 success: 0x2d9670,
+                danger: 0xba3b4b,
+                warning: 0xa37520,
                 terminal: 0xffffff,
                 logo: [0x000000, 0xffffff],
                 ansi: [
@@ -66,6 +74,8 @@ impl Palette {
                 muted: 0x657b83,
                 accent: 0x2aa198,
                 success: 0x859900,
+                danger: 0xdc322f,
+                warning: 0xb58900,
                 terminal: 0x002b36,
                 // Solarized base1 (its body text) and base03; pure white glares on it.
                 logo: [0x93a1a1, 0x002b36],

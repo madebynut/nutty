@@ -725,48 +725,210 @@ impl WorkspaceView {
         let preferences = &self.store.profile.preferences;
         let ui = crate::fonts::FontPair::ui(preferences, cx);
         let terminal = crate::fonts::FontPair::terminal(preferences, cx);
-        let theme = cx.global_mut::<gpui_kit::component::Theme>();
-        theme.font_family = ui.latin.family;
-        theme.font_size = px(preferences.ui_font_size);
-        theme.mono_font_family = terminal.latin.family;
-        theme.mono_font_size = px(preferences.font_size);
-        theme.radius = px(6.);
-        theme.radius_lg = px(10.);
-        theme.shadow = false;
-        theme.focus_ring = false;
-        theme.background = rgb(p.base).into();
-        theme.foreground = rgb(p.text).into();
-        theme.border = rgb(p.border).into();
-        theme.input = rgb(p.border).into();
-        theme.ring = rgb(p.accent).into();
-        theme.caret = rgb(p.accent).into();
-        theme.primary = rgb(p.accent).into();
-        theme.primary_foreground = rgb(p.base).into();
-        theme.secondary = rgb(p.surface).into();
-        theme.secondary_foreground = rgb(p.text).into();
-        theme.muted = rgb(p.surface).into();
-        theme.muted_foreground = rgb(p.muted).into();
-        theme.accent = rgb(p.hover).into();
-        theme.accent_foreground = rgb(p.text).into();
-        theme.button = rgb(p.surface).into();
-        theme.button_foreground = rgb(p.text).into();
-        theme.button_hover = rgb(p.hover).into();
-        theme.button_active = rgb(p.hover).into();
-        theme.button_primary = rgb(p.accent).into();
-        theme.button_primary_foreground = rgb(p.base).into();
-        theme.button_primary_hover = theme.button_primary.mix_oklab(rgb(p.text).into(), 0.08);
-        theme.button_primary_active = theme.button_primary.mix_oklab(rgb(p.base).into(), 0.08);
-        theme.popover = rgb(p.sidebar).into();
-        theme.popover_foreground = rgb(p.text).into();
-        theme.colors.list = rgb(p.sidebar).into();
-        theme.list_hover = rgb(p.hover).into();
-        theme.list_active = rgb(p.hover).into();
-        theme.list_active_border = rgb(p.accent).into();
-        theme.selection = rgb(p.hover).into();
-        // Components such as primary buttons draw from the resolved tokens, which
-        // `Theme::change` computed from the stock colours above; re-derive them so
-        // they follow the palette (otherwise primary buttons stay the stock white).
-        theme.tokens = gpui_kit::component::ThemeTokens::from(theme.colors);
+        let (ui_size, mono_size) = (preferences.ui_font_size, preferences.font_size);
+        // `Theme::update` re-resolves the component tokens from the colours set here
+        // and pushes them to the base layer (tooltips, scrollbars, resize handles),
+        // so every stock component draws from the palette rather than the library's
+        // default grey and white theme.
+        gpui_kit::component::Theme::update(cx, |theme| {
+            let c = |color: u32| -> gpui_kit::Hsla { rgb(color).into() };
+            let hover = |color: u32| c(color).mix_oklab(c(p.text), 0.88);
+            let press = |color: u32| c(color).mix_oklab(c(p.base), 0.88);
+            theme.font_family = ui.latin.family;
+            theme.font_size = px(ui_size);
+            theme.mono_font_family = terminal.latin.family;
+            theme.mono_font_size = px(mono_size);
+            theme.radius = px(6.);
+            theme.radius_lg = px(10.);
+            theme.shadow = false;
+            theme.focus_ring = false;
+
+            theme.background = c(p.base);
+            theme.foreground = c(p.text);
+            theme.border = c(p.border);
+            theme.input = c(p.border);
+            theme.ring = c(p.accent);
+            theme.caret = c(p.accent);
+            theme.selection = c(p.hover);
+            theme.overlay = gpui_kit::black().opacity(0.5);
+            theme.window_border = c(p.border);
+            theme.skeleton = c(p.surface);
+            theme.drag_border = c(p.accent);
+            theme.drop_target = c(p.accent).opacity(0.15);
+
+            theme.primary = c(p.accent);
+            theme.primary_hover = hover(p.accent);
+            theme.primary_active = press(p.accent);
+            theme.primary_foreground = c(p.base);
+            theme.secondary = c(p.surface);
+            theme.secondary_hover = c(p.hover);
+            theme.secondary_active = c(p.hover);
+            theme.secondary_foreground = c(p.text);
+            theme.muted = c(p.surface);
+            theme.muted_foreground = c(p.muted);
+            theme.accent = c(p.hover);
+            theme.accent_foreground = c(p.text);
+            theme.link = c(p.accent);
+            theme.link_hover = hover(p.accent);
+            theme.link_active = press(p.accent);
+
+            for (fill, fill_hover, fill_active, foreground, color) in [
+                (
+                    &mut theme.colors.danger,
+                    &mut theme.colors.danger_hover,
+                    &mut theme.colors.danger_active,
+                    &mut theme.colors.danger_foreground,
+                    p.danger,
+                ),
+                (
+                    &mut theme.colors.warning,
+                    &mut theme.colors.warning_hover,
+                    &mut theme.colors.warning_active,
+                    &mut theme.colors.warning_foreground,
+                    p.warning,
+                ),
+                (
+                    &mut theme.colors.success,
+                    &mut theme.colors.success_hover,
+                    &mut theme.colors.success_active,
+                    &mut theme.colors.success_foreground,
+                    p.success,
+                ),
+                (
+                    &mut theme.colors.info,
+                    &mut theme.colors.info_hover,
+                    &mut theme.colors.info_active,
+                    &mut theme.colors.info_foreground,
+                    p.ansi[4],
+                ),
+            ] {
+                *fill = c(color);
+                *fill_hover = hover(color);
+                *fill_active = press(color);
+                *foreground = c(p.base);
+            }
+
+            theme.button = c(p.surface);
+            theme.button_hover = c(p.hover);
+            theme.button_active = c(p.hover);
+            theme.button_foreground = c(p.text);
+            theme.button_secondary = c(p.surface);
+            theme.button_secondary_hover = c(p.hover);
+            theme.button_secondary_active = c(p.hover);
+            theme.button_secondary_foreground = c(p.text);
+            for (fill, fill_hover, fill_active, foreground, color) in [
+                (
+                    &mut theme.colors.button_primary,
+                    &mut theme.colors.button_primary_hover,
+                    &mut theme.colors.button_primary_active,
+                    &mut theme.colors.button_primary_foreground,
+                    p.accent,
+                ),
+                (
+                    &mut theme.colors.button_danger,
+                    &mut theme.colors.button_danger_hover,
+                    &mut theme.colors.button_danger_active,
+                    &mut theme.colors.button_danger_foreground,
+                    p.danger,
+                ),
+                (
+                    &mut theme.colors.button_warning,
+                    &mut theme.colors.button_warning_hover,
+                    &mut theme.colors.button_warning_active,
+                    &mut theme.colors.button_warning_foreground,
+                    p.warning,
+                ),
+                (
+                    &mut theme.colors.button_success,
+                    &mut theme.colors.button_success_hover,
+                    &mut theme.colors.button_success_active,
+                    &mut theme.colors.button_success_foreground,
+                    p.success,
+                ),
+                (
+                    &mut theme.colors.button_info,
+                    &mut theme.colors.button_info_hover,
+                    &mut theme.colors.button_info_active,
+                    &mut theme.colors.button_info_foreground,
+                    p.ansi[4],
+                ),
+            ] {
+                *fill = c(color);
+                *fill_hover = hover(color);
+                *fill_active = press(color);
+                *foreground = c(p.base);
+            }
+
+            theme.popover = c(p.sidebar);
+            theme.popover_foreground = c(p.text);
+            theme.colors.list = c(p.sidebar);
+            theme.list_even = c(p.sidebar);
+            theme.list_head = c(p.surface);
+            theme.list_hover = c(p.hover);
+            theme.list_active = c(p.hover);
+            theme.list_active_border = c(p.accent);
+            theme.colors.table = c(p.base);
+            theme.table_even = c(p.sidebar);
+            theme.table_head = c(p.surface);
+            theme.table_head_foreground = c(p.muted);
+            theme.table_foot = c(p.surface);
+            theme.table_foot_foreground = c(p.muted);
+            theme.table_hover = c(p.hover);
+            theme.table_active = c(p.hover);
+            theme.table_active_border = c(p.accent);
+            theme.table_row_border = c(p.border);
+
+            theme.switch = c(p.hover);
+            theme.switch_thumb = c(p.text);
+            theme.slider_bar = c(p.accent);
+            theme.slider_thumb = c(p.text);
+            theme.progress_bar = c(p.accent);
+            theme.scrollbar = gpui_kit::transparent_black();
+            theme.scrollbar_thumb = c(p.muted).opacity(0.45);
+            theme.scrollbar_thumb_hover = c(p.muted).opacity(0.7);
+
+            theme.tab_bar = c(p.sidebar);
+            theme.tab_bar_segmented = c(p.surface);
+            theme.tab = c(p.sidebar);
+            theme.tab_active = c(p.base);
+            theme.tab_foreground = c(p.muted);
+            theme.tab_active_foreground = c(p.text);
+            theme.colors.sidebar = c(p.sidebar);
+            theme.sidebar_foreground = c(p.text);
+            theme.sidebar_border = c(p.border);
+            theme.sidebar_accent = c(p.hover);
+            theme.sidebar_accent_foreground = c(p.text);
+            theme.sidebar_primary = c(p.accent);
+            theme.sidebar_primary_foreground = c(p.base);
+            theme.title_bar = c(p.sidebar);
+            theme.title_bar_border = c(p.border);
+            theme.status_bar = c(p.sidebar);
+            theme.status_bar_border = c(p.border);
+            theme.accordion = c(p.sidebar);
+            theme.group_box = c(p.surface);
+            theme.group_box_foreground = c(p.text);
+            theme.description_list_label = c(p.surface);
+            theme.description_list_label_foreground = c(p.muted);
+
+            theme.chart_bullish = c(p.success);
+            theme.chart_bearish = c(p.danger);
+            theme.chart_grid = c(p.border);
+            for (color, light, index) in [
+                (&mut theme.colors.red, &mut theme.colors.red_light, 1),
+                (&mut theme.colors.green, &mut theme.colors.green_light, 2),
+                (&mut theme.colors.yellow, &mut theme.colors.yellow_light, 3),
+                (&mut theme.colors.blue, &mut theme.colors.blue_light, 4),
+                (
+                    &mut theme.colors.magenta,
+                    &mut theme.colors.magenta_light,
+                    5,
+                ),
+                (&mut theme.colors.cyan, &mut theme.colors.cyan_light, 6),
+            ] {
+                *color = c(p.ansi[index]);
+                *light = c(p.ansi[index + 8]);
+            }
+        });
     }
 
     fn add_terminal(
@@ -2655,7 +2817,7 @@ impl WorkspaceView {
                 .child(crate::controls::input(&self.forward_bind, cx).w_full())
                 .children(
                     self.forward_bind_warning(cx)
-                        .map(forwarding::warning_notice),
+                        .map(|text| forwarding::warning_notice(text, self.palette())),
                 )
                 .child(
                     div()

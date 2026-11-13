@@ -282,7 +282,7 @@ impl WorkspaceView {
             .font_weight(gpui_kit::FontWeight::MEDIUM)
             .child(div().flex_shrink_0().size(px(5.)).rounded_full().bg(rgb(
                 if snapshot.error.is_some() {
-                    0xf17c82
+                    p.danger
                 } else if snapshot.closed {
                     p.muted
                 } else {

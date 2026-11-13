@@ -120,7 +120,7 @@ impl WorkspaceView {
                         editor
                             .error
                             .as_ref()
-                            .map(|e| div().text_color(rgb(p.ansi[1])).child(e.clone())),
+                            .map(|e| div().text_color(rgb(p.danger)).child(e.clone())),
                     )
                     .child(
                         div()

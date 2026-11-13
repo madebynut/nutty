@@ -1754,6 +1754,7 @@ impl WorkspaceView {
                     && agent.process.supports_terminal_login()
             });
         let is_agent = matches!(target, Some(super::model_picker::Target::Agent(_)));
+        let p = self.palette();
         div()
             .flex()
             .flex_col()
@@ -1762,7 +1763,7 @@ impl WorkspaceView {
             .py_2()
             .text_size(px(12.))
             .child(
-                div().text_color(rgb(0xf17c82)).child(
+                div().text_color(rgb(p.danger)).child(
                     error
                         .split(": ")
                         .map(|part| crate::i18n::localize(part.to_string()))

@@ -26,13 +26,13 @@ impl Drop for Running {
 }
 
 /// Amber security notice shown under a setting, for example an exposed listener.
-pub(super) fn warning_notice(text: &str) -> gpui_kit::Div {
+pub(super) fn warning_notice(text: &str, p: crate::theme::Palette) -> gpui_kit::Div {
     div()
         .flex()
         .items_start()
         .gap_2()
         .text_size(px(11.))
-        .text_color(rgb(0xe7b567))
+        .text_color(rgb(p.warning))
         .child(
             Icon::new(IconName::TriangleAlert)
                 .size_3()
@@ -322,7 +322,7 @@ impl WorkspaceView {
                                 .map(|(host, port)| format!("{host}:{port}"))
                                 .unwrap_or_else(|| "SOCKS5".into())
                         )))
-                    .children(rule.exposure_warning().map(warning_notice))
+                    .children(rule.exposure_warning().map(|text| warning_notice(text, p)))
                     .children(connecting.then(|| {
                         div()
                             .text_size(px(11.))
@@ -332,7 +332,7 @@ impl WorkspaceView {
                     .children(running.and_then(|r| r.error.as_ref()).map(|error| {
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(p.ansi[1]))
+                            .text_color(rgb(p.danger))
                             .child(crate::i18n::localize(error.clone()))
                     }))
                     .child(

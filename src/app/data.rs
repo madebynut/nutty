@@ -93,7 +93,7 @@ impl WorkspaceView {
                     .children(preview.warnings.iter().map(|warning| {
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(0xe7b567))
+                            .text_color(rgb(p.warning))
                             .child(crate::i18n::localize(warning.clone()))
                     }))
                     .child(

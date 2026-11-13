@@ -616,7 +616,7 @@ impl WorkspaceView {
             .children(editor.probe_status.as_ref().map(|(success, message)| {
                 div()
                     .text_size(px(12.))
-                    .text_color(rgb(if *success { p.success } else { p.ansi[1] }))
+                    .text_color(rgb(if *success { p.success } else { p.danger }))
                     .child(crate::i18n::localize(message.clone()))
             }))
             .into_any_element()
@@ -1914,6 +1914,7 @@ impl WorkspaceView {
                             .then(|| {
                                 super::forwarding::warning_notice(
                                     "此 API 地址使用 http 且不在本机：对话内容和 API 密钥都会明文传输，可能被网络中的设备截获。请尽量改用 https。",
+                                    self.palette(),
                                 )
                             }),
                     )
@@ -2008,7 +2009,7 @@ impl WorkspaceView {
                     .flex_1()
                     .min_w_0()
                     .text_size(px(12.))
-                    .text_color(rgb(0xf17c82))
+                    .text_color(rgb(p.danger))
                     .child(crate::i18n::localize(error.clone()))
             }))
             .children(

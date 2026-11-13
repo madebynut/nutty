@@ -493,11 +493,7 @@ impl WorkspaceView {
                                 |(success, status)| {
                                     div()
                                         .text_size(px(12.))
-                                        .text_color(rgb(if success {
-                                            p.success
-                                        } else {
-                                            p.ansi[1]
-                                        }))
+                                        .text_color(rgb(if success { p.success } else { p.danger }))
                                         .child(status)
                                 },
                             ))
@@ -738,7 +734,7 @@ impl WorkspaceView {
                             .map(|(success, status)| {
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(if success { p.success } else { p.ansi[1] }))
+                                    .text_color(rgb(if success { p.success } else { p.danger }))
                                     .child(status)
                             }),
                     ),
@@ -966,6 +962,7 @@ impl WorkspaceView {
                             || {
                                 super::forwarding::warning_notice(
                                     "此地址使用 http 且不在本机：工具调用内容和 Bearer Token 都会明文传输，可能被网络中的设备截获。请尽量改用 https。",
+                                    self.palette(),
                                 )
                             },
                         ),

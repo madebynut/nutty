@@ -20,7 +20,7 @@ impl WorkspaceView {
             .children(self.transfer_error.as_ref().map(|error| {
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(p.ansi[1]))
+                    .text_color(rgb(p.danger))
                     .child(crate::i18n::localize(error.clone()))
             }))
             .children((!self.transfers.is_empty()).then(|| {
@@ -169,7 +169,7 @@ impl WorkspaceView {
                                     .children(task.error.as_ref().map(|error| {
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(p.ansi[1]))
+                                            .text_color(rgb(p.danger))
                                             .text_ellipsis()
                                             .child(crate::i18n::localize(error.clone()))
                                     }))

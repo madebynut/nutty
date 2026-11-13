@@ -161,13 +161,13 @@ impl WorkspaceView {
                     .children(plan.as_ref().err().map(|error| {
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(0xf17c82))
+                            .text_color(rgb(p.danger))
                             .child(error.to_string())
                     }))
                     .children(removal.error.as_ref().map(|error| {
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(0xf17c82))
+                            .text_color(rgb(p.danger))
                             .child(crate::i18n::localize(error.clone()))
                     }))
                     .child(
@@ -945,7 +945,7 @@ impl WorkspaceView {
                                 let (color, text) = match result {
                                     Ok(info) if !info.identities.is_empty() => (p.success, crate::i18n::localize(format!("SSH Agent 可用，已加载 {} 个密钥", info.identities.len()))),
                                     Ok(_) => (p.muted, crate::i18n::text("SSH Agent 已连接，但没有密钥。请先使用 ssh-add 加载密钥").into()),
-                                    Err(error) => (0xf17c82, crate::i18n::localize(error.clone())),
+                                    Err(error) => (p.danger, crate::i18n::localize(error.clone())),
                                 };
                                 div().flex().flex_col().gap_1().text_size(px(12.)).text_color(rgb(color)).child(text)
                                     .children(result.as_ref().ok().map(|info| div().text_color(rgb(p.muted)).text_ellipsis().child(info.socket.display().to_string())))
@@ -1307,7 +1307,7 @@ impl WorkspaceView {
             .children(form.probe_result.as_ref().map(|(success, text)| {
                 div()
                     .text_size(px(12.))
-                    .text_color(rgb(if *success { p.success } else { p.ansi[1] }))
+                    .text_color(rgb(if *success { p.success } else { p.danger }))
                     .child(text.clone())
             }))
             .child(
