@@ -629,6 +629,15 @@ impl WorkspaceView {
                 select_saved: editing.is_none(),
             });
             self.connection_form(editing, window, cx);
+            // New jump hosts start in their own group so they list apart from the
+            // hosts they route to; the field stays editable.
+            if editing.is_none()
+                && let Some(form) = &self.form
+            {
+                form.fields["group"].update(cx, |input, cx| {
+                    input.set_value(crate::i18n::text("跳板机"), window, cx)
+                });
+            }
         }
     }
 
