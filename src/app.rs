@@ -3524,7 +3524,7 @@ impl Render for WorkspaceView {
                                                             cx.notify();
                                                         },
                                                     ))
-                                                    .child(Icon::new(IconName::Terminal).size_3())
+                                                    .child(Icon::new(IconName::Terminal).size_4())
                                                     .child(
                                                         div()
                                                             .text_size(px(12.))

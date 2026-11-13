@@ -29,7 +29,7 @@ impl Appearance {
         match self {
             Self::Graphite => crate::i18n::text("石墨"),
             Self::Light => crate::i18n::text("浅色"),
-            Self::Solarized => "Solarized",
+            Self::Solarized => "Solarized Dark",
         }
     }
 }
