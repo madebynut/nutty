@@ -6,7 +6,7 @@
 
 ## 触发规则
 
-推送到 `main`、拉取请求和手动触发运行 `.github/workflows/ci.yml`，分别在 Ubuntu 24.04 和 Windows Server 2025 上完成 Linux x86_64 与 Windows x86_64 的检查、测试和打包。
+推送到 `main`、拉取请求和手动触发运行 `.github/workflows/ci.yml`，在 Ubuntu 24.04（x86_64 与 ARM64）和 Windows Server 2025 上完成 Linux x86_64、Linux ARM64 与 Windows x86_64 的检查、测试和打包。
 
 只有推送 `v*` tag 才运行 `.github/workflows/release.yml`。发布工作流没有定时或手动触发入口。
 
@@ -33,12 +33,13 @@ git tag -a v1.0.0-beta.1-test.1 -m "Nutty 1.0.0-beta.1 packaging trial"
 | `Nutty-<tag>-macos-x86_64.zip` | macOS 15 Intel | Intel `Nutty.app` |
 | `Nutty-<tag>-windows-x86_64.zip` | Windows Server 2025 / MSVC | `Nutty.exe`、许可证、第三方声明、更新日志和使用说明 |
 | `Nutty-<tag>-linux-x86_64.tar.gz` | Ubuntu 24.04 x86_64 | `Nutty`、桌面项、图标、许可证、第三方声明、更新日志和使用说明 |
+| `Nutty-<tag>-linux-aarch64.tar.gz` | Ubuntu 24.04 ARM64 | `Nutty`、桌面项、图标、许可证、第三方声明、更新日志和使用说明 |
 
 每个平台运行格式、严格 Clippy、工作区测试、Rustdoc，再构建 release。打包检查应用名称、版本、图标和 CLI 启动。每个发布包都附带 `LICENSE`、`CHANGELOG.md`、`SECURITY.md` 和由 cargo-about 生成的 `THIRD-PARTY-NOTICES.txt`（模板 `about.hbs`，接受的许可证见 `about.toml`，须与 `deny.toml` 保持一致）；有依赖的许可证不在列表中时，打包失败。发布任务生成 SHA-256 校验清单；全部平台通过后，临时 tag 创建公开 Pre-release，正式 tag 只创建 Draft，避免未签名包被自动标记为稳定版。
 
 ## 发布门禁
 
-依赖策略在根目录 `deny.toml`，覆盖四个发货平台，检查安全公告、许可证、禁用项和依赖来源。CI 在每次推送和拉取请求时运行 `cargo deny --workspace --all-features check`；发布工作流运行同一检查，预发布遇到问题只警告，正式 tag 遇到任何未通过项会停止发布。完整报告见 `dependency-advisories` 附件。
+依赖策略在根目录 `deny.toml`，覆盖五个发货平台，检查安全公告、许可证、禁用项和依赖来源。CI 在每次推送和拉取请求时运行 `cargo deny --workspace --all-features check`；发布工作流运行同一检查，预发布遇到问题只警告，正式 tag 遇到任何未通过项会停止发布。完整报告见 `dependency-advisories` 附件。
 
 - **安全公告：** 漏洞、unsound、已撤回（yanked）的依赖一律失败。停止维护的依赖默认失败，只有 `deny.toml` 中逐条写明理由和移除条件的才豁免，目前 8 条，均为 GPUI/gpui-kit、zbus、rmcp 和 russh-sftp 的间接依赖，没有已知漏洞。
 - **许可证：** 只允许与 Apache-2.0 分发兼容的宽松许可证；MPL-2.0 仅对 `option-ext`、`dwrote`、`cbindgen` 三个未修改的依赖例外。

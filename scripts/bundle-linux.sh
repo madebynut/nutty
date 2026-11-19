@@ -2,10 +2,16 @@
 # Portable Linux archive. Does not modify macOS or Windows bundles.
 set -eu
 
-if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
-  echo "this bundle is for Linux x86_64" >&2
+if [ "$(uname -s)" != Linux ]; then
+  echo "this bundle is for Linux" >&2
   exit 1
 fi
+# The archive is built on, and named after, the machine architecture.
+case "$(uname -m)" in
+  x86_64) arch=x86_64 ;;
+  aarch64 | arm64) arch=aarch64 ;;
+  *) echo "unsupported Linux architecture: $(uname -m)" >&2; exit 1 ;;
+esac
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 profile=${1:-release}
@@ -25,7 +31,7 @@ fi
 tag=${NUTTY_RELEASE_TAG:-v$version}
 python3 -c 'import re, sys; version, tag = sys.argv[1:]; assert re.fullmatch("v" + re.escape(version) + r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?", tag)' "$version" "$tag"
 
-name="Nutty-$tag-linux-x86_64"
+name="Nutty-$tag-linux-$arch"
 stage="$root/target/bundle/$name"
 rm -rf "$stage"
 mkdir -p "$stage" "$root/dist"

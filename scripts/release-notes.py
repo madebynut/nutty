@@ -30,6 +30,7 @@ print(
 | macOS Intel | `*-macos-x86_64.zip` |
 | Windows x86_64 | `*-windows-x86_64.zip` |
 | Linux x86_64（glibc 2.39+） | `*-linux-x86_64.tar.gz` |
+| Linux ARM64（glibc 2.39+） | `*-linux-aarch64.tar.gz` |
 
 下载后用 `SHA256SUMS.txt` 校验：`shasum -a 256 -c SHA256SUMS.txt --ignore-missing`（Windows：`Get-FileHash`）。
 

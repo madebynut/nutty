@@ -1,6 +1,6 @@
 # Linux 使用与构建
 
-官方包在 Ubuntu 24.04 x86_64 上构建，需要 glibc 2.39 或更新的版本。更早的发行版请从源码构建。快捷键与 Windows 相同，使用 `Ctrl Shift` 组合。
+官方包分别在 Ubuntu 24.04 x86_64 和 ARM64（aarch64）上构建，需要 glibc 2.39 或更新的版本。更早的发行版请从源码构建。快捷键与 Windows 相同，使用 `Ctrl Shift` 组合。
 
 ## 运行依赖
 
