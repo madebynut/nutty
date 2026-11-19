@@ -19,6 +19,13 @@
 
 <br />
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/dark.png" />
+    <img src="assets/screenshots/light.png" alt="Nutty 在 macOS 上的工作区：左侧为分组连接列表，右侧为左右分屏的终端与 AI 助手" width="100%" />
+  </picture>
+</p>
+
 Nutty 是为每天和服务器打交道的人做的桌面终端。本地 Shell、SSH 会话、远程文件和 AI 助手共用一个窗口，也共用同一份上下文：AI 知道当前窗格连的是哪台机器、用的是什么 Shell；文件面板跟着终端的当前目录走；端口转发随连接一起启动和停止。
 
 界面由 GPU 直接绘制，不依赖 Electron 或内嵌浏览器；终端解析使用 [Alacritty](https://github.com/alacritty/alacritty) 的内核，大量输出也能流畅滚动。
