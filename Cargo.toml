@@ -56,7 +56,7 @@ rmcp = { version = "3.9.0", default-features = false, features = [
 ] }
 agent-client-protocol = { version = "5.0.0", features = ["process"] }
 # Pinned to a reviewed commit; bump deliberately after reviewing upstream changes.
-russh = { git = "https://github.com/Eugeny/russh", rev = "b541663a88381aab9f6af1af7bbadb02e155058a" }
+russh = "0.65.2"
 russh-sftp = "3.0.1"
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
