@@ -27,6 +27,7 @@ impl WorkspaceView {
             Ok(layouts) => layouts,
             Err(error) => {
                 self.status = Some(error.to_string());
+                self.local(None, window, cx);
                 return;
             }
         };
@@ -116,6 +117,10 @@ impl WorkspaceView {
         // Heal a fallback checkpoint on the next background write; the damaged
         // original has already been retained separately by the loader.
         self.workspace_checkpoint = self.status.is_none().then_some(snapshot);
+        // Quitting with every tab closed still starts with a terminal, as a first launch does.
+        if self.tabs.is_empty() {
+            self.local(None, window, cx);
+        }
     }
 
     pub(super) fn workspace_snapshot(&self) -> Snapshot {

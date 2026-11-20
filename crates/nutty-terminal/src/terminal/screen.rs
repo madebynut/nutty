@@ -2,20 +2,21 @@
 
 use cursor_icon::CursorIcon;
 
-use super::{Listener, graphics::Graphics};
+use super::{Listener, context::SessionStart, graphics::Graphics};
 use alacritty_terminal::{
     grid::Dimensions as _,
     term::{Term, TermMode},
     vte::ansi::{
         Attr, CharsetIndex, ClearMode, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
-        KeyboardModesApplyBehavior, LineClearMode, Mode, ModifyOtherKeys, PrivateMode, Rgb,
-        ScpCharPath, ScpUpdateMode, StandardCharset, TabulationClearMode,
+        KeyboardModesApplyBehavior, LineClearMode, Mode, ModifyOtherKeys, NamedPrivateMode,
+        PrivateMode, Rgb, ScpCharPath, ScpUpdateMode, StandardCharset, TabulationClearMode,
     },
 };
 
 pub(super) struct Screen<'a> {
     pub term: &'a mut Term<Listener>,
     pub graphics: &'a mut Graphics,
+    pub context: &'a mut SessionStart,
 }
 impl Screen<'_> {
     fn region(&self) -> (i32, i32) {
@@ -24,17 +25,19 @@ impl Screen<'_> {
             .unwrap_or((0, self.term.screen_lines() as i32 - 1))
     }
     fn scroll(&mut self, top: i32, bottom: i32, count: i32) {
+        let alternate = self.term.mode().contains(TermMode::ALT_SCREEN);
+        self.context.scroll(self.term, top, bottom, count);
         self.graphics.scroll(
             top,
             bottom,
             count,
-            self.term.mode().contains(TermMode::ALT_SCREEN),
+            alternate,
             self.term.history_size(),
             self.term.screen_lines(),
         );
     }
     fn line_scroll(&mut self) {
-        if !self.graphics.has_placements() {
+        if !self.graphics.has_placements() && !self.context.active() {
             return;
         }
         let (top, bottom) = self.region();
@@ -133,24 +136,29 @@ impl Handler for Screen<'_> {
         self.scroll(top, bottom, -(v0.min((bottom - top + 1) as usize) as i32));
         self.term.scroll_down(v0);
     }
+    // alacritty ignores IL and DL while the cursor is outside the scrolling region.
     fn insert_blank_lines(&mut self, v0: usize) {
-        let (_, bottom) = self.region();
-        let top = self.term.grid().cursor.point.line.0;
-        self.scroll(
-            top,
-            bottom,
-            -(v0.min((bottom - top + 1).max(0) as usize) as i32),
-        );
+        let (top, bottom) = self.region();
+        let cursor = self.term.grid().cursor.point.line.0;
+        if (top..=bottom).contains(&cursor) {
+            self.scroll(
+                cursor,
+                bottom,
+                -(v0.min((bottom - cursor + 1) as usize) as i32),
+            );
+        }
         self.term.insert_blank_lines(v0);
     }
     fn delete_lines(&mut self, v0: usize) {
-        let (_, bottom) = self.region();
-        let top = self.term.grid().cursor.point.line.0;
-        self.scroll(
-            top,
-            bottom,
-            v0.min((bottom - top + 1).max(0) as usize) as i32,
-        );
+        let (top, bottom) = self.region();
+        let cursor = self.term.grid().cursor.point.line.0;
+        if (top..=bottom).contains(&cursor) {
+            self.scroll(
+                cursor,
+                bottom,
+                v0.min((bottom - cursor + 1) as usize) as i32,
+            );
+        }
         self.term.delete_lines(v0);
     }
     fn erase_chars(&mut self, v0: usize) {
@@ -175,6 +183,11 @@ impl Handler for Screen<'_> {
         self.term.clear_line(v0);
     }
     fn clear_screen(&mut self, v0: ClearMode) {
+        match v0 {
+            ClearMode::All => self.context.clear_viewport(self.term),
+            ClearMode::Saved => self.context.clear_history(self.term),
+            _ => {}
+        }
         self.term.clear_screen(v0);
     }
     fn clear_tabs(&mut self, v0: TabulationClearMode) {
@@ -185,6 +198,7 @@ impl Handler for Screen<'_> {
     }
     fn reset_state(&mut self) {
         *self.graphics = Graphics::default();
+        self.context.clear();
         self.term.reset_state();
     }
     fn reverse_index(&mut self) {
@@ -212,6 +226,9 @@ impl Handler for Screen<'_> {
             return;
         }
         let previous = self.term.mode().contains(TermMode::ALT_SCREEN);
+        if !previous && v0 == PrivateMode::Named(NamedPrivateMode::SwapScreenAndSetRestoreCursor) {
+            self.context.hide(self.term);
+        }
         self.term.set_private_mode(v0);
         if !previous && self.term.mode().contains(TermMode::ALT_SCREEN) {
             self.graphics.clear_alternate();
@@ -226,6 +243,7 @@ impl Handler for Screen<'_> {
         self.term.unset_private_mode(v0);
         if previous && !self.term.mode().contains(TermMode::ALT_SCREEN) {
             self.graphics.clear_alternate();
+            self.context.reveal(self.term);
         }
     }
     fn report_private_mode(&mut self, v0: PrivateMode) {

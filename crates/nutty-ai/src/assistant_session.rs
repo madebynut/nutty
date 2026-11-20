@@ -27,9 +27,22 @@ pub struct ProposedCommand {
     pub text: String,
     pub language: Option<String>,
     pub state: CommandState,
+    /// The pane's terminal target (its `user@host` session) when the question was
+    /// asked; `None` when the terminal reported none.
+    pub target: Option<Uuid>,
 }
 
 impl ProposedCommand {
+    /// Whether the proposal may run on `current`, the pane's terminal target now. A
+    /// proposal made for another target is bound to `current` and needs a second,
+    /// deliberate request, so a host change in the pane never redirects it silently.
+    pub fn retarget(&mut self, current: Option<Uuid>) -> bool {
+        if self.target == current {
+            return true;
+        }
+        self.target = current;
+        false
+    }
     pub fn matches_block(&self, language: Option<&str>, code: &str) -> bool {
         language.is_some_and(crate::command::shell_language)
             && self.language.as_deref().is_none_or(|expected| {
@@ -72,7 +85,10 @@ impl Entry {
                 let command = if environment.supports_powershell_commands() {
                     crate::command::prepare_powershell_read_only(&proposed.text)?
                 } else {
-                    crate::command::prepare_read_only(&proposed.text)?
+                    crate::command::prepare_read_only_for(
+                        &proposed.text,
+                        environment.operating_system,
+                    )?
                 };
                 ensure!(
                     environment.supports_powershell_commands()
@@ -117,6 +133,7 @@ pub struct Pending {
     pub id: Uuid,
     pub cancel: CancellationToken,
     pub terminal_revision: u64,
+    pub terminal_target: Option<Uuid>,
     pub partial: String,
 }
 
@@ -162,6 +179,7 @@ impl Session {
         &mut self,
         prompt: String,
         terminal_revision: u64,
+        terminal_target: Option<Uuid>,
     ) -> Result<(Uuid, CancellationToken)> {
         ensure!(!self.ended, "此终端的 AI 会话已结束");
         ensure!(self.pending.is_none(), "请等待当前回复，或先停止请求");
@@ -193,6 +211,7 @@ impl Session {
             id,
             cancel: cancel.clone(),
             terminal_revision,
+            terminal_target,
             partial: String::new(),
         });
         Ok((id, cancel))
@@ -259,6 +278,7 @@ impl Session {
                             .map(|block| block.language.clone()),
                         text,
                         state: CommandState::Suggested,
+                        target: pending.terminal_target,
                     })
                     .collect(),
             }),
@@ -386,7 +406,11 @@ impl Session {
         });
         true
     }
-    pub fn continue_tools(&mut self, terminal_revision: u64) -> Result<(Uuid, CancellationToken)> {
+    pub fn continue_tools(
+        &mut self,
+        terminal_revision: u64,
+        terminal_target: Option<Uuid>,
+    ) -> Result<(Uuid, CancellationToken)> {
         ensure!(
             !self.ended
                 && self.pending.is_none()
@@ -402,6 +426,7 @@ impl Session {
             id,
             cancel: cancel.clone(),
             terminal_revision,
+            terminal_target,
             partial: String::new(),
         });
         Ok((id, cancel))
@@ -461,7 +486,7 @@ mod tests {
             "```bash\n{diagnostic}\n```\n```powershell\npwd\n```\n```sh\ncat\n```\n```sh\nrm file\n```\n```sh\nuname -s\n```\n```sh\nwhoami\n```\n```sh\nid\n```"
         );
         let mut session = Session::new();
-        let (request, _) = session.begin("inspect target".into(), 7)?;
+        let (request, _) = session.begin("inspect target".into(), 7, None)?;
         session
             .accept(
                 session.id,
@@ -490,6 +515,33 @@ mod tests {
         assert_eq!(
             dispatch[0].1,
             crate::command::prepare_read_only(diagnostic)?
+        );
+        let mut mac = Session::new();
+        let text = "```sh\nfree -h\n```\n```sh\nvm_stat\n```".to_string();
+        let (request, _) = mac.begin("memory".into(), 1, None)?;
+        mac.accept(
+            mac.id,
+            request,
+            Ok(Reply {
+                commands: crate::command::proposals(&text),
+                text,
+                tools: vec![],
+                message: None,
+            }),
+        )
+        .context("macOS reply")?;
+        let macos = crate::session_environment::Environment {
+            operating_system: crate::session_environment::Platform::MacOs,
+            startup_shell: Some("/bin/zsh".into()),
+            ..Default::default()
+        };
+        let mac_entry = mac.entries.last_mut().context("macOS entry")?;
+        let mac_dispatch = mac_entry.prepare_automatic(&macos, AutomationState::Ready);
+        assert_eq!(mac_dispatch.len(), 1, "only the macOS command is sent");
+        assert_eq!(mac_dispatch[0].0, mac_entry.commands[1].id);
+        assert!(
+            matches!(&mac_entry.commands[0].state, CommandState::Deferred(reason) if reason.contains("macOS")),
+            "a Linux-only command explains why it stayed manual"
         );
         for index in [1, 2, 3, 6] {
             assert!(
@@ -528,7 +580,7 @@ mod tests {
         let mut session = Session::new();
         let original = session.id;
         let text = "  排查磁盘\n保留多行内容  ";
-        let (request, _) = session.begin(text.into(), 1)?;
+        let (request, _) = session.begin(text.into(), 1, None)?;
         session.accept(
             original,
             request,
@@ -545,7 +597,7 @@ mod tests {
         assert_eq!(session.user_message(original, 1), None);
         session.reset();
         assert!(!session.needs_credentials);
-        session.begin("new conversation".into(), 1)?;
+        session.begin("new conversation".into(), 1, None)?;
         assert_eq!(session.user_message(original, 0), None);
         session.end();
         assert_eq!(session.user_message(session.id, 0), None);
@@ -556,7 +608,7 @@ mod tests {
     fn inline_execution_matches_only_final_shell_proposals_and_clears_login_on_reset() -> Result<()>
     {
         let mut session = Session::new();
-        let (request, _) = session.begin("show commands".into(), 1)?;
+        let (request, _) = session.begin("show commands".into(), 1, None)?;
         session
             .accept(
                 session.id,
@@ -576,13 +628,53 @@ mod tests {
         assert!(!proposal.matches_block(Some("json"), "pwd"));
         assert!(!proposal.matches_block(None, "pwd"));
         assert!(!proposal.matches_block(Some("sh"), "pwd && whoami"));
-        let (request, _) = session.begin("connect Agent".into(), 1)?;
+        let (request, _) = session.begin("connect Agent".into(), 1, None)?;
         session.accept(session.id, request, Err(crate::acp::LoginRequired.into()));
         assert!(session.needs_agent_login);
         session.reset();
         assert!(!session.needs_agent_login);
         Ok(())
     }
+    #[test]
+    fn proposals_remember_the_asked_target_and_need_a_second_request_elsewhere() -> Result<()> {
+        let staging = Some(Uuid::new_v4());
+        let production = Some(Uuid::new_v4());
+        let mut session = Session::new();
+        let (request, _) = session.begin("restart nginx".into(), 1, staging)?;
+        session
+            .accept(
+                session.id,
+                request,
+                Ok(Reply {
+                    text: "```sh\nsystemctl restart nginx\n```".into(),
+                    commands: vec!["systemctl restart nginx".into()],
+                    tools: vec![],
+                    message: None,
+                }),
+            )
+            .context("reply should be accepted")?;
+        let proposal = session.entries[1].commands[0].id;
+        let command = session.command_mut(proposal).context("proposal")?;
+        assert_eq!(
+            command.target, staging,
+            "the target of the question is kept"
+        );
+        assert!(command.retarget(staging));
+        assert!(
+            !command.retarget(production),
+            "another host must not run the proposal on the same click"
+        );
+        assert!(
+            command.retarget(production),
+            "a second deliberate request runs it"
+        );
+        assert!(
+            !command.retarget(None),
+            "leaving the SSH target counts as a change"
+        );
+        Ok(())
+    }
+
     #[test]
     fn tool_stop_and_reset_reject_late_results_and_cancel_the_session_runtime() -> Result<()> {
         let mut session = Session::new();
@@ -620,7 +712,7 @@ mod tests {
     {
         let mut session = Session::new();
         let id = session.id;
-        let (request, cancelled) = session.begin("inspect".into(), 3)?;
+        let (request, cancelled) = session.begin("inspect".into(), 3, None)?;
         assert!(session.progress(id, request, "```sh\npwd\n```".into()));
         session.stop();
         assert!(cancelled.is_cancelled());
@@ -637,7 +729,7 @@ mod tests {
                 .commands
                 .is_empty()
         );
-        let (request, _) = session.begin("next".into(), 4)?;
+        let (request, _) = session.begin("next".into(), 4, None)?;
         session.reset();
         assert!(!session.progress(id, request, "stale after reset".into()));
         assert!(session.entries.is_empty());
@@ -648,8 +740,8 @@ mod tests {
         let mut first = Session::new();
         let mut second = Session::new();
         let old_session = first.id;
-        let (old_request, cancelled) = first.begin("first pane".into(), 7)?;
-        second.begin("second pane".into(), 8)?;
+        let (old_request, cancelled) = first.begin("first pane".into(), 7, None)?;
+        second.begin("second pane".into(), 8, None)?;
         first.reset();
         assert!(cancelled.is_cancelled());
         assert!(
@@ -668,10 +760,10 @@ mod tests {
         );
         assert!(first.entries.is_empty());
         assert_eq!(second.conversation()[0].text(), "second pane");
-        let (_, cancelled) = first.begin("fresh".into(), 9)?;
+        let (_, cancelled) = first.begin("fresh".into(), 9, None)?;
         first.end();
         assert!(cancelled.is_cancelled());
-        assert!(first.begin("closed".into(), 10).is_err());
+        assert!(first.begin("closed".into(), 10, None).is_err());
         let cancelled = second
             .pending
             .as_ref()

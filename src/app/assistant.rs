@@ -9,7 +9,7 @@ use gpui_kit::component::{
     input::{InputEvent, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
     popover::Popover,
-    select::{SelectEvent, SelectState},
+    select::{SearchableVec, SelectEvent, SelectItem, SelectState},
     text::{TextView, TextViewStyle},
 };
 use gpui_kit::{
@@ -30,16 +30,69 @@ use crate::{
     provider::{Provider, Reasoning, Selection},
 };
 
+/// What a pane's assistant talks to. Choices are keyed by id, never by their label,
+/// so a provider named like an Agent ("ACP: Claude") cannot select that Agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AssistantChoice {
+    Provider(Uuid),
+    Agent(Uuid),
+}
+
+#[derive(Clone)]
+pub(super) struct ChoiceItem {
+    choice: AssistantChoice,
+    title: SharedString,
+}
+
+impl SelectItem for ChoiceItem {
+    type Value = AssistantChoice;
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+    fn value(&self) -> &AssistantChoice {
+        &self.choice
+    }
+}
+
+pub(super) type AssistantChoices = SearchableVec<ChoiceItem>;
+
+/// Enabled providers followed by enabled Agents, labelled as before.
+pub(super) fn assistant_choices(
+    providers: &[Provider],
+    agents: &[crate::integrations::Agent],
+) -> Vec<ChoiceItem> {
+    providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .map(|provider| ChoiceItem {
+            choice: AssistantChoice::Provider(provider.id),
+            title: provider.name.clone().into(),
+        })
+        .chain(
+            agents
+                .iter()
+                .filter(|agent| agent.enabled)
+                .map(|agent| ChoiceItem {
+                    choice: AssistantChoice::Agent(agent.id),
+                    title: format!("ACP: {}", agent.name).into(),
+                }),
+        )
+        .collect()
+}
+
 pub(super) struct PaneAssistant {
     pub agent_settings: super::agent_settings::AgentSettings,
     pub permissions: Vec<crate::acp::Permission>,
+    /// Whether an Agent can prepare a terminal login command, resolved in the
+    /// background because it searches the disk for the Agent's CLI.
+    pub terminal_login: Option<(Uuid, bool)>,
     pub command: Entity<TextareaState>,
     pub command_error: Option<String>,
     pub prompt: Entity<TextareaState>,
     pub prompt_expanded: bool,
     pub prompt_max_rows: Cell<usize>,
     pub session: Session,
-    pub provider: Entity<SelectState<crate::controls::Choices>>,
+    pub provider: Entity<SelectState<AssistantChoices>>,
     pub model: Entity<SelectState<crate::controls::Choices>>,
     pub reasoning: Entity<SelectState<crate::controls::Choices>>,
     pub picker: Entity<super::model_picker::ModelPicker>,
@@ -85,17 +138,8 @@ impl PaneAssistant {
             .filter(|provider| provider.enabled)
             .collect();
         let provider = cx.new(|cx| {
-            crate::controls::select_state(
-                enabled
-                    .iter()
-                    .map(|provider| SharedString::from(provider.name.clone()))
-                    .chain(
-                        agents
-                            .iter()
-                            .filter(|agent| agent.enabled)
-                            .map(|agent| SharedString::from(format!("ACP: {}", agent.name))),
-                    )
-                    .collect::<Vec<_>>(),
+            SelectState::new(
+                AssistantChoices::new(assistant_choices(providers, agents)),
                 Some(gpui_kit::component::IndexPath::new(0)),
                 window,
                 cx,
@@ -131,12 +175,12 @@ impl PaneAssistant {
         inputs.push(cx.subscribe_in(
             &provider,
             window,
-            move |workspace, _, event: &SelectEvent<crate::controls::Choices>, window, cx| {
-                let SelectEvent::Confirm(Some(name)) = event else {
+            move |workspace, _, event: &SelectEvent<AssistantChoices>, window, cx| {
+                let SelectEvent::Confirm(Some(choice)) = event else {
                     return;
                 };
                 workspace.activate_pane(id, cx);
-                if name.starts_with("ACP: ") {
+                let AssistantChoice::Provider(provider) = *choice else {
                     if let Some(pane) = workspace.panes.get_mut(&id) {
                         pane.assistant.session.reset();
                         pane.assistant.permissions.clear();
@@ -157,13 +201,13 @@ impl PaneAssistant {
                     workspace.load_agent_configuration(id, false, cx);
                     cx.notify();
                     return;
-                }
+                };
                 let Some(provider) = workspace
                     .store
                     .profile
                     .ai_providers
                     .iter()
-                    .find(|provider| provider.enabled && provider.name == name.as_ref())
+                    .find(|candidate| candidate.enabled && candidate.id == provider)
                     .cloned()
                 else {
                     return;
@@ -220,6 +264,7 @@ impl PaneAssistant {
         Self {
             agent_settings: super::agent_settings::AgentSettings::default(),
             permissions: Vec::new(),
+            terminal_login: None,
             command,
             command_error: None,
             prompt,
@@ -241,7 +286,7 @@ impl WorkspaceView {
             .panes
             .get(&id)
             .ok_or_else(|| anyhow::anyhow!(crate::i18n::text("终端已关闭")))?;
-        let name = pane
+        let choice = *pane
             .assistant
             .provider
             .read(cx)
@@ -252,7 +297,7 @@ impl WorkspaceView {
             .profile
             .ai_providers
             .iter()
-            .find(|provider| provider.enabled && provider.name == name.as_ref())
+            .find(|provider| provider.enabled && choice == AssistantChoice::Provider(provider.id))
             .cloned()
             .ok_or_else(|| anyhow::anyhow!(crate::i18n::text("提供方不存在")))?;
         let model = pane
@@ -293,24 +338,24 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let levels =
-            self.panes
-                .get(&id)
-                .and_then(|pane| {
-                    let provider = pane.assistant.provider.read(cx).selected_value()?;
-                    let model = pane.assistant.model.read(cx).selected_value()?;
-                    let provider = self.store.profile.ai_providers.iter().find(|candidate| {
-                        candidate.enabled && candidate.name == provider.as_ref()
-                    })?;
-                    provider
-                        .models
-                        .iter()
-                        .any(|candidate| candidate.id == model.as_ref())
-                        .then(|| {
-                            crate::provider_catalog::reasoning_levels(provider.kind, model.as_ref())
-                        })
-                })
-                .unwrap_or_else(|| vec![Reasoning::Auto]);
+        let levels = self
+            .panes
+            .get(&id)
+            .and_then(|pane| {
+                let provider = *pane.assistant.provider.read(cx).selected_value()?;
+                let model = pane.assistant.model.read(cx).selected_value()?;
+                let provider = self.store.profile.ai_providers.iter().find(|candidate| {
+                    candidate.enabled && provider == AssistantChoice::Provider(candidate.id)
+                })?;
+                provider
+                    .models
+                    .iter()
+                    .any(|candidate| candidate.id == model.as_ref())
+                    .then(|| {
+                        crate::provider_catalog::reasoning_levels(provider.kind, model.as_ref())
+                    })
+            })
+            .unwrap_or_else(|| vec![Reasoning::Auto]);
         let items: Vec<SharedString> = levels
             .iter()
             .map(|level| SharedString::from(level.display_label()))
@@ -773,14 +818,13 @@ impl WorkspaceView {
         let agent = self
             .panes
             .get(&id)
-            .and_then(|pane| pane.assistant.provider.read(cx).selected_value())
-            .and_then(|name| name.strip_prefix("ACP: "))
-            .and_then(|name| {
+            .and_then(|pane| pane.assistant.provider.read(cx).selected_value().copied())
+            .and_then(|choice| {
                 self.store
                     .profile
                     .agents
                     .iter()
-                    .find(|agent| agent.enabled && agent.name == name)
+                    .find(|agent| agent.enabled && choice == AssistantChoice::Agent(agent.id))
             })
             .cloned();
         let selection = match if agent.is_some() {
@@ -812,11 +856,11 @@ impl WorkspaceView {
             return;
         }
         let prompt = pane.assistant.prompt.read(cx).value().to_string();
-        let (request, cancel) = match pane
-            .assistant
-            .session
-            .begin(prompt, snapshot.automation_revision)
-        {
+        let (request, cancel) = match pane.assistant.session.begin(
+            prompt,
+            snapshot.automation_revision,
+            snapshot.directory_target.as_ref().map(|target| target.id),
+        ) {
             Ok(pending) => pending,
             Err(error) => {
                 pane.assistant.session.error = Some(error.to_string());
@@ -898,7 +942,11 @@ impl WorkspaceView {
         let Some(generation) = pane.assistant.session.accept(session, request, result) else {
             return;
         };
-        if !completed || !pane.assistant.session.auto_read_only {
+        if !completed {
+            self.refresh_agent_login(id, cx);
+            return;
+        }
+        if !pane.assistant.session.auto_read_only {
             return;
         }
         let ready =
@@ -959,6 +1007,19 @@ impl WorkspaceView {
             proposal.state = CommandState::Deferred(
                 crate::i18n::text("命令语言与当前终端 Shell 不匹配，已阻止发送").into(),
             );
+            cx.notify();
+            return;
+        }
+        // The pane may now show another host than the one the question was about.
+        let target = pane.view.read(cx).terminal.engine.directory_target();
+        if !proposal.retarget(target.as_ref().map(|target| target.id)) {
+            proposal.state =
+                CommandState::Deferred(match target {
+                    // Only the template is translated; the name comes from the remote title.
+                    Some(target) => crate::i18n::text("终端目标已变化：再次点击将发送到 {}")
+                        .replacen("{}", &target.name, 1),
+                    None => crate::i18n::text("终端目标已变化：再次点击将发送到当前终端").into(),
+                });
             cx.notify();
             return;
         }
@@ -1069,11 +1130,15 @@ impl WorkspaceView {
         if pane.assistant.session.unresolved_tools() || pane.view.read(cx).snapshot.closed {
             return;
         }
-        let (request, cancel) = match pane
-            .assistant
-            .session
-            .continue_tools(pane.view.read(cx).snapshot.automation_revision)
-        {
+        let (request, cancel) = match pane.assistant.session.continue_tools(
+            pane.view.read(cx).snapshot.automation_revision,
+            pane.view
+                .read(cx)
+                .terminal
+                .engine
+                .directory_target()
+                .map(|target| target.id),
+        ) {
             Ok(value) => value,
             Err(error) => {
                 pane.assistant.session.error = Some(error.to_string());
@@ -1261,22 +1326,24 @@ impl WorkspaceView {
         cx: &gpui_kit::App,
     ) -> Option<super::model_picker::Target> {
         let pane = self.panes.get(&id)?;
-        let name = pane.assistant.provider.read(cx).selected_value()?;
-        if let Some(name) = name.strip_prefix("ACP: ") {
-            return self
-                .store
-                .profile
-                .agents
-                .iter()
-                .find(|agent| agent.enabled && agent.name == name)
-                .map(|agent| super::model_picker::Target::Agent(agent.id));
-        }
+        let provider = match *pane.assistant.provider.read(cx).selected_value()? {
+            AssistantChoice::Agent(agent) => {
+                return self
+                    .store
+                    .profile
+                    .agents
+                    .iter()
+                    .find(|candidate| candidate.enabled && candidate.id == agent)
+                    .map(|agent| super::model_picker::Target::Agent(agent.id));
+            }
+            AssistantChoice::Provider(provider) => provider,
+        };
         let provider = self
             .store
             .profile
             .ai_providers
             .iter()
-            .find(|provider| provider.enabled && provider.name == name.as_ref())?;
+            .find(|candidate| candidate.enabled && candidate.id == provider)?;
         Some(super::model_picker::Target::Model {
             provider: provider.id,
             model: pane.assistant.model.read(cx).selected_value()?.to_string(),
@@ -1304,7 +1371,7 @@ impl WorkspaceView {
             return;
         }
         tracing::debug!(pane = %id, ?target, "assistant model selected");
-        let (name, models, model) = match target {
+        let (choice, models, model) = match target {
             super::model_picker::Target::Model { provider, model } => {
                 let Some(provider) = self.store.profile.ai_providers.iter().find(|p| {
                     p.id == provider && p.enabled && p.models.iter().any(|m| m.id == model)
@@ -1312,7 +1379,7 @@ impl WorkspaceView {
                     return;
                 };
                 (
-                    provider.name.clone(),
+                    AssistantChoice::Provider(provider.id),
                     provider
                         .models
                         .iter()
@@ -1332,7 +1399,7 @@ impl WorkspaceView {
                     return;
                 };
                 (
-                    format!("ACP: {}", agent.name),
+                    AssistantChoice::Agent(agent.id),
                     vec![SharedString::from("Agent default")],
                     "Agent default".into(),
                 )
@@ -1346,7 +1413,7 @@ impl WorkspaceView {
                 .provider
                 .read(cx)
                 .selected_value()
-                .is_none_or(|previous| previous.as_ref() != name);
+                .is_none_or(|previous| *previous != choice);
             if provider_changed {
                 pane.assistant.session.reset();
                 pane.assistant.permissions.clear();
@@ -1354,7 +1421,7 @@ impl WorkspaceView {
                 pane.assistant.session.stop();
             }
             pane.assistant.provider.update(cx, |state, cx| {
-                state.set_selected_value(&SharedString::from(name), window, cx)
+                state.set_selected_value(&choice, window, cx)
             });
             pane.assistant.model.update(cx, |state, cx| {
                 state.set_items(models.into(), window, cx);
@@ -1553,7 +1620,10 @@ impl WorkspaceView {
             .children(pane.assistant.permissions.iter().filter(|permission|!permission.cancel.is_cancelled()).map(|permission|{
                 let permission_id=permission.id;
                 div().flex().flex_col().gap_2().p_3().border_b_1().border_color(rgb(palette.border)).child(crate::i18n::text("Agent 请求执行工具")).child(div().text_size(px(11.)).child(permission.detail.clone()))
-                    .child(div().flex().gap_2().children(permission.options.iter().enumerate().map(|(index,label)|crate::controls::button(format!("acp-permission-{permission_id}-{index}")).compact().label(label.clone()).on_click(cx.listener(move|view,_,_,cx|view.answer_agent_permission(id,session_id,permission_id,Some(index),cx))))).child(crate::controls::button(format!("acp-cancel-{permission_id}")).ghost().compact().label(crate::i18n::text("拒绝")).on_click(cx.listener(move|view,_,_,cx|view.answer_agent_permission(id,session_id,permission_id,None,cx)))))
+                    // Labels come from the Agent, so the option kind decides the wording and style
+                    // and only the template is translated.
+                    .child(div().flex().flex_wrap().gap_2().children(permission.options.iter().enumerate().filter(|(_,option)|option.kind==crate::acp::PermissionKind::Allow).map(|(index,option)|crate::controls::button(format!("acp-permission-{permission_id}-{index}")).primary().compact().label(crate::i18n::text("允许：{}").replacen("{}",&option.label,1)).on_click(cx.listener(move|view,_,_,cx|view.answer_agent_permission(id,session_id,permission_id,Some(index),cx)))))
+                        .child({let rejection=permission.rejection(); crate::controls::button(format!("acp-cancel-{permission_id}")).ghost().compact().label(crate::i18n::text("拒绝")).on_click(cx.listener(move|view,_,_,cx|view.answer_agent_permission(id,session_id,permission_id,rejection,cx)))}))
             }))
                 .children(session.entries.is_empty().then(|| div().flex().flex_col().gap_2().py_1()
                     .child(div().text_size(px(14.)).child(crate::i18n::text("从这个终端开始")))
@@ -1749,10 +1819,12 @@ impl WorkspaceView {
         let pane = &self.panes[&id];
         let target = self.assistant_target(id, cx);
         let needs_login = pane.assistant.session.needs_agent_login
-            || self.store.profile.agents.iter().any(|agent| {
-                target == Some(super::model_picker::Target::Agent(agent.id))
-                    && agent.process.supports_terminal_login()
-            });
+            || pane
+                .assistant
+                .terminal_login
+                .is_some_and(|(agent, supported)| {
+                    supported && target == Some(super::model_picker::Target::Agent(agent))
+                });
         let is_agent = matches!(target, Some(super::model_picker::Target::Agent(_)));
         let p = self.palette();
         div()
@@ -1840,6 +1912,36 @@ impl WorkspaceView {
             .into_any_element()
     }
 
+    /// Login support depends on finding the Agent's CLI on disk (PATH and version
+    /// manager directories), so it is resolved off the UI thread when an error appears.
+    pub(super) fn refresh_agent_login(&mut self, id: Uuid, cx: &gpui_kit::App) {
+        let Some(super::model_picker::Target::Agent(agent)) = self.assistant_target(id, cx) else {
+            return;
+        };
+        let Some(process) = self
+            .store
+            .profile
+            .agents
+            .iter()
+            .find(|candidate| candidate.id == agent)
+            .map(|agent| agent.process.clone())
+        else {
+            return;
+        };
+        let events = self.events.clone();
+        self.launch(async move {
+            let supported =
+                tokio::task::spawn_blocking(move || process.supports_terminal_login()).await;
+            let _ = events
+                .send(BackendEvent::AgentLogin {
+                    pane: id,
+                    agent,
+                    supported: supported.unwrap_or(false),
+                })
+                .await;
+        });
+    }
+
     fn prepare_agent_login(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let Some(super::model_picker::Target::Agent(agent_id)) = self.assistant_target(id, cx)
         else {
@@ -1915,5 +2017,57 @@ impl WorkspaceView {
             .prompt
             .update(cx, |input, cx| input.set_value(prompt, window, cx));
         self.ask_pane(id, window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn providers_named_like_agents_keep_their_own_identity() {
+        let provider = Provider {
+            id: Uuid::new_v4(),
+            name: "ACP: Claude".into(),
+            kind: crate::provider::Kind::Anthropic,
+            endpoint: "https://api.anthropic.com".into(),
+            models: Vec::new(),
+            proxy: None,
+            enabled: true,
+        };
+        let agent = crate::integrations::Agent {
+            id: Uuid::new_v4(),
+            name: "Claude".into(),
+            enabled: true,
+            process: crate::integrations::Process {
+                program: "claude-agent-acp".into(),
+                args: Vec::new(),
+                directory: std::env::temp_dir(),
+                environment: false,
+            },
+        };
+        let disabled = Provider {
+            id: Uuid::new_v4(),
+            enabled: false,
+            ..provider.clone()
+        };
+        let choices =
+            assistant_choices(&[disabled, provider.clone()], std::slice::from_ref(&agent));
+        assert!(
+            choices
+                .iter()
+                .all(|choice| choice.title().as_ref() == "ACP: Claude"),
+            "visible labels are unchanged"
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| *choice.value())
+                .collect::<Vec<_>>(),
+            [
+                AssistantChoice::Provider(provider.id),
+                AssistantChoice::Agent(agent.id)
+            ]
+        );
     }
 }

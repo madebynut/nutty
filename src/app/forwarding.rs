@@ -10,6 +10,15 @@ pub(super) struct Running {
     error: Option<String>,
 }
 impl Running {
+    /// The backend stopped a forward the user did not stop.
+    fn interrupted(&self) -> bool {
+        self.error.is_none()
+            && !self.cancel.is_cancelled()
+            && self
+                .forward
+                .as_ref()
+                .is_some_and(|forward| forward.cancel.is_cancelled())
+    }
     fn active(&self) -> bool {
         self.error.is_none()
             && !self.cancel.is_cancelled()
@@ -47,6 +56,35 @@ pub(super) fn warning_notice(text: &str, p: crate::theme::Palette) -> gpui_kit::
         )
 }
 
+/// Parses a forwarding target as `host:port`, or `[address]:port` for IPv6. An
+/// unbracketed IPv6 address is rejected because its last group would become the port.
+fn parse_target(value: &str) -> Result<(String, u16)> {
+    let ipv6 = || {
+        anyhow::anyhow!(crate::i18n::text(
+            "IPv6 目标需写成 [地址]:端口，例如 [fe80::1]:22"
+        ))
+    };
+    let value = value.trim();
+    let (host, port) = if let Some(rest) = value.strip_prefix('[') {
+        rest.split_once("]:").ok_or_else(ipv6)?
+    } else {
+        let (host, port) = value
+            .rsplit_once(':')
+            .context(crate::i18n::text("目标格式应为 host:port"))?;
+        if host.contains(':') {
+            return Err(ipv6());
+        }
+        (host, port)
+    };
+    let port = port
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)
+        .context(crate::i18n::text("端口必须介于 1 和 65535 之间"))?;
+    Ok((host.trim().to_string(), port))
+}
+
 impl WorkspaceView {
     /// Warning for the listen address being typed, before a mode is chosen.
     pub(super) fn forward_bind_warning(&self, cx: &Context<Self>) -> Option<&'static str> {
@@ -70,16 +108,13 @@ impl WorkspaceView {
                 .forward_bind
                 .read(cx)
                 .value()
+                .trim()
                 .parse()
                 .context(crate::i18n::text("监听地址格式应为 127.0.0.1:8080"))?;
             let target = if mode == ForwardMode::Dynamic {
                 None
             } else {
-                let value = self.forward_target.read(cx).value();
-                let (host, port) = value
-                    .rsplit_once(':')
-                    .context(crate::i18n::text("目标格式应为 host:port"))?;
-                Some((host.trim_matches(['[', ']']).to_string(), port.parse()?))
+                Some(parse_target(self.forward_target.read(cx).value().as_ref())?)
             };
             let rule = Rule {
                 id: Uuid::new_v4(),
@@ -329,6 +364,13 @@ impl WorkspaceView {
                             .text_color(rgb(p.accent))
                             .child(crate::i18n::text("连接中…"))
                     }))
+                    .children(running.filter(|r| r.interrupted()).map(|_| {
+                        div().text_size(px(11.)).text_color(rgb(p.warning)).child(
+                            crate::i18n::text(
+                                "转发已中断：连接断开、远程端口仍被占用或监听出错；可重新启动",
+                            ),
+                        )
+                    }))
                     .children(running.and_then(|r| r.error.as_ref()).map(|error| {
                         div()
                             .text_size(px(11.))
@@ -355,5 +397,37 @@ impl WorkspaceView {
                     )
             }))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_target;
+
+    #[test]
+    fn targets_are_trimmed_and_ipv6_needs_brackets() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_target(" db.internal:5432 ")?,
+            ("db.internal".to_string(), 5432)
+        );
+        assert_eq!(parse_target("[fe80::1]:22")?, ("fe80::1".to_string(), 22));
+        for (value, expected) in [
+            ("fe80::1", "IPv6 目标需写成 [地址]:端口，例如 [fe80::1]:22"),
+            (
+                "[fe80::1]",
+                "IPv6 目标需写成 [地址]:端口，例如 [fe80::1]:22",
+            ),
+            ("host", "目标格式应为 host:port"),
+            ("host:http", "端口必须介于 1 和 65535 之间"),
+            ("host:0", "端口必须介于 1 和 65535 之间"),
+            ("host:70000", "端口必须介于 1 和 65535 之间"),
+        ] {
+            assert_eq!(
+                parse_target(value).err().map(|error| format!("{error:#}")),
+                Some(expected.to_string()),
+                "{value}"
+            );
+        }
+        Ok(())
     }
 }

@@ -280,6 +280,15 @@ enum BackendEvent {
         session: Uuid,
         permission: crate::acp::Permission,
     },
+    AgentPermissionClosed {
+        pane: Uuid,
+        permission: Uuid,
+    },
+    AgentLogin {
+        pane: Uuid,
+        agent: Uuid,
+        supported: bool,
+    },
     ToolResult {
         pane: Uuid,
         session: Uuid,
@@ -1413,11 +1422,40 @@ impl WorkspaceView {
                 session,
                 permission,
             } => {
-                if let Some(pane) = self.panes.get_mut(&pane)
-                    && pane.assistant.session.id == session
-                    && !pane.assistant.session.ended
+                if let Some(assistant) = self.panes.get_mut(&pane).map(|pane| &mut pane.assistant)
+                    && assistant.session.id == session
+                    && !assistant.session.ended
                 {
-                    pane.assistant.permissions.push(permission);
+                    // Expired or cancelled requests must not leave a dead card behind.
+                    let closed = permission.cancel.clone();
+                    let id = permission.id;
+                    assistant.permissions.push(permission);
+                    let events = self.events.clone();
+                    self.launch(async move {
+                        closed.cancelled().await;
+                        let _ = events
+                            .send(BackendEvent::AgentPermissionClosed {
+                                pane,
+                                permission: id,
+                            })
+                            .await;
+                    });
+                }
+            }
+            BackendEvent::AgentLogin {
+                pane,
+                agent,
+                supported,
+            } => {
+                if let Some(pane) = self.panes.get_mut(&pane) {
+                    pane.assistant.terminal_login = Some((agent, supported));
+                }
+            }
+            BackendEvent::AgentPermissionClosed { pane, permission } => {
+                if let Some(pane) = self.panes.get_mut(&pane) {
+                    pane.assistant
+                        .permissions
+                        .retain(|item| item.id != permission);
                 }
             }
             BackendEvent::ToolResult {
@@ -1633,7 +1671,12 @@ impl WorkspaceView {
                         });
                         let connection = node.as_ref().map(|node| node.connection.id);
                         pane.node = node;
-                        pane.assistant.session = crate::assistant_session::Session::new();
+                        // A reconnect starts a new conversation but keeps the pane's options.
+                        let previous = &pane.assistant.session;
+                        let mut session = crate::assistant_session::Session::new();
+                        session.auto_read_only = previous.auto_read_only;
+                        session.capture_output = previous.capture_output;
+                        pane.assistant.session = session;
                         if let Some(connection) = connection {
                             self.start_connection_forwards(connection, cx);
                         }
@@ -2686,8 +2729,11 @@ impl WorkspaceView {
                                             .map(|index| {
                                                 let file = &view.files[index];
                                                 let workspace = cx.entity().downgrade();
-                                                let expected_name = file.name.clone();
-                                                let expected_directory = view.files_path.clone();
+                                                // Shared by the click and menu handlers to check the row still shows this entry.
+                                                let expected_name: std::rc::Rc<str> = file.name.as_str().into();
+                                                let expected_directory: std::rc::Rc<str> = view.files_path.as_str().into();
+                                                let open_name = expected_name.clone();
+                                                let open_directory = expected_directory.clone();
                                                 div()
                                                     .id(index)
                                                     .h(px(36.))
@@ -2700,7 +2746,14 @@ impl WorkspaceView {
                                                     .hover(|style| style.bg(rgb(p.hover)))
                                                     .on_click(cx.listener(
                                                         move |view, _, window, cx| {
-                                                            view.open_file(index, window, cx)
+                                                            // A listing may have replaced the rows since this one was painted.
+                                                            if *view.files_path == *open_directory
+                                                                && view.files.get(index).is_some_and(
+                                                                    |file| *file.name == *open_name,
+                                                                )
+                                                            {
+                                                                view.open_file(index, window, cx)
+                                                            }
                                                         },
                                                     ))
                                                     .child(
@@ -2739,7 +2792,7 @@ impl WorkspaceView {
                                                             let download_directory = expected_directory.clone();
                                                             menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(crate::i18n::text("下载文件或目录")).icon(IconName::Download).on_click(move |_, window, cx| {
                                                                 let _ = download_workspace.update(cx, |view, cx| {
-                                                                    if view.files_current() && view.files_path == download_directory && view.files.get(index).is_some_and(|f| f.name == download_name)
+                                                                    if view.files_current() && *view.files_path == *download_directory && view.files.get(index).is_some_and(|f| *f.name == *download_name)
                                                                         && let Some(node) = view.file_node() {
                                                                         view.download_path(node, remote_path(&download_directory, &download_name), window, cx);
                                                                     }
@@ -2755,7 +2808,7 @@ impl WorkspaceView {
                                                                 let expected_directory = expected_directory.clone();
                                                                 menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(crate::i18n::text(label)).icon(icon).on_click(move |_, window, cx| {
                                                                     let _ = workspace.update(cx, |view, cx| {
-                                                                        if view.files_path == expected_directory && view.files.get(index).is_some_and(|f| f.name == expected_name) {
+                                                                        if *view.files_path == *expected_directory && view.files.get(index).is_some_and(|f| *f.name == *expected_name) {
                                                                             view.open_file_action(Some(index), action, window, cx);
                                                                         }
                                                                     });

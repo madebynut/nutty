@@ -18,7 +18,7 @@ use russh_sftp::client::SftpSession;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, RwLock, oneshot},
+    sync::{Mutex, RwLock, oneshot, watch},
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -51,6 +51,51 @@ struct Client {
     prompts: Sender<HostPrompt>,
     remote_routes: Arc<Mutex<HashMap<(String, u32), RemoteTarget>>>,
     remote_budget: Arc<tokio::sync::Semaphore>,
+    /// True while a host identity prompt waits for the user; see `handshake_timeout`.
+    prompting: watch::Sender<bool>,
+}
+
+/// How long a host identity prompt waits for the user's decision.
+const HOST_PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Marks a host identity prompt as open until it is dropped, even if the handshake is.
+struct PromptOpen<'a>(&'a watch::Sender<bool>);
+impl<'a> PromptOpen<'a> {
+    fn new(prompting: &'a watch::Sender<bool>) -> Self {
+        prompting.send_replace(true);
+        Self(prompting)
+    }
+}
+impl Drop for PromptOpen<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
+    }
+}
+
+/// Bounds a handshake to `limit` of network time. Time spent while a host identity
+/// prompt is open is excluded: the user's decision has its own `HOST_PROMPT_TIMEOUT`.
+async fn handshake_timeout<F: std::future::Future>(
+    limit: Duration,
+    mut prompting: watch::Receiver<bool>,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    tokio::pin!(future);
+    let mut remaining = limit;
+    loop {
+        let started = tokio::time::Instant::now();
+        tokio::select! {
+            biased;
+            result = tokio::time::timeout(remaining, &mut future) => return result,
+            Ok(_) = prompting.wait_for(|open| *open) => {
+                remaining = remaining.saturating_sub(started.elapsed());
+            }
+        }
+        tokio::select! {
+            biased;
+            output = &mut future => return Ok(output),
+            _ = prompting.wait_for(|open| !*open) => {}
+        }
+    }
 }
 
 impl client::Handler for Client {
@@ -67,16 +112,25 @@ impl client::Handler for Client {
             "主机名包含 known_hosts 不支持的字符，无法记录服务器身份"
         );
         let (answer, response) = oneshot::channel();
-        self.prompts
-            .send(HostPrompt {
-                id: Uuid::new_v4(),
-                host: format!("{}:{}", self.host, self.port),
-                fingerprint: key.fingerprint(keys::HashAlg::Sha256).to_string(),
-                answer,
-            })
-            .await
-            .context("主机身份确认窗口已关闭")?;
-        if response.await.unwrap_or(false) {
+        let prompt = HostPrompt {
+            id: Uuid::new_v4(),
+            host: format!("{}:{}", self.host, self.port),
+            fingerprint: key.fingerprint(keys::HashAlg::Sha256).to_string(),
+            answer,
+        };
+        let open = PromptOpen::new(&self.prompting);
+        let trusted = tokio::time::timeout(HOST_PROMPT_TIMEOUT, async {
+            self.prompts
+                .send(prompt)
+                .await
+                .context("主机身份确认窗口已关闭")?;
+            Ok::<_, anyhow::Error>(response.await.unwrap_or(false))
+        })
+        .await
+        // Not an `Elapsed` cause: an unanswered prompt is not a network failure to retry.
+        .map_err(|_| anyhow::anyhow!("主机身份确认超时"))??;
+        drop(open);
+        if trusted {
             use std::io::Write as _;
             let mut options = std::fs::OpenOptions::new();
             options.append(true).create(true);
@@ -330,6 +384,7 @@ impl Registry {
                 .as_ref()
                 .map(|node| node.remote_routes.clone())
                 .unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new())));
+            let (prompting, prompt_open) = watch::channel(false);
             let client = Client {
                 host: connection.host.clone(),
                 port: connection.port,
@@ -337,6 +392,7 @@ impl Registry {
                 prompts: self.prompts.clone(),
                 remote_routes: remote_routes.clone(),
                 remote_budget: Arc::new(tokio::sync::Semaphore::new(128)),
+                prompting,
             };
             let config = Arc::new(client::Config {
                 keepalive_interval: (connection.ssh.keepalive_seconds > 0)
@@ -373,8 +429,9 @@ impl Registry {
                     client::connect_stream(config, stream, client).await
                 }
             };
-            let mut handle = tokio::time::timeout(
+            let mut handle = handshake_timeout(
                 Duration::from_secs(connection.ssh.connect_timeout_seconds),
+                prompt_open,
                 establishing,
             )
             .await
@@ -529,17 +586,9 @@ impl Registry {
             ensure!(authenticated, "SSH 身份认证失败");
             let handle = Arc::new(handle);
             let node = if let Some(node) = reusable {
-                let routes = node.remote_routes.lock().await.clone();
-                for ((address, port), target) in routes {
-                    if !target.cancel.is_cancelled() {
-                        handle
-                            .tcpip_forward(address, port)
-                            .await
-                            .context("恢复远程端口转发失败")?;
-                    }
-                }
-                *node.handle.write().await = handle;
+                *node.handle.write().await = handle.clone();
                 *node.proxies.write().await = proxies.clone();
+                node.restore_remote_forwards(&handle).await;
                 node
             } else {
                 Arc::new(Node {
@@ -636,20 +685,80 @@ impl Registry {
         for node in &disconnected {
             node.cancel.cancel();
         }
+        let mut failure = None;
         for node in disconnected {
             node.cancel.cancel();
-            node.handle()
-                .await
+            let handle = node.handle().await;
+            // A transport that already died has nothing left to close.
+            if let Err(error) = handle
                 .disconnect(russh::Disconnect::ByApplication, "", "en")
-                .await?;
+                .await
+                && !handle.is_closed()
+            {
+                failure.get_or_insert(error);
+            }
         }
-        Ok(())
+        failure.map_or(Ok(()), |error| Err(error.into()))
     }
 }
 
 impl Drop for Node {
     fn drop(&mut self) {
         self.cancel.cancel();
+    }
+}
+
+const ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(10);
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
+
+/// Accept failures caused by load or by a client that left before `accept` returned.
+/// The listener itself is still usable after these.
+fn transient_accept_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    if matches!(
+        error.kind(),
+        ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::TimedOut
+            | ErrorKind::OutOfMemory
+    ) {
+        return true;
+    }
+    let Some(code) = error.raw_os_error() else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use nix::libc;
+        matches!(
+            code,
+            libc::EMFILE
+                | libc::ENFILE
+                | libc::ENOBUFS
+                | libc::ENOMEM
+                // Linux reports a pending connection's own network error from accept().
+                | libc::EPROTO
+                | libc::EPERM
+                | libc::ENOPROTOOPT
+                | libc::EOPNOTSUPP
+                | libc::ENETDOWN
+                | libc::ENETUNREACH
+                | libc::EHOSTDOWN
+                | libc::EHOSTUNREACH
+        )
+    }
+    #[cfg(windows)]
+    {
+        // WSAEMFILE, WSAENOBUFS, WSAENETDOWN.
+        matches!(code, 10024 | 10055 | 10050)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = code;
+        false
     }
 }
 
@@ -809,6 +918,26 @@ pub enum FileOperation {
 impl Node {
     async fn handle(&self) -> Arc<client::Handle<Client>> {
         self.handle.read().await.clone()
+    }
+    /// Requests the remote listeners again on a new transport. The server may still
+    /// hold a port for the session that dropped, so a refusal stops only that forward
+    /// (its cancel token is what callers watch) instead of failing the reconnect.
+    async fn restore_remote_forwards(&self, handle: &client::Handle<Client>) {
+        let routes = self.remote_routes.lock().await.clone();
+        for ((address, port), target) in routes {
+            if target.cancel.is_cancelled() {
+                continue;
+            }
+            let restored = tokio::time::timeout(
+                Duration::from_secs(30),
+                handle.tcpip_forward(address.clone(), port),
+            )
+            .await;
+            if !matches!(restored, Ok(Ok(_))) {
+                tracing::warn!(%address, port, "remote forwarding could not be restored after reconnect");
+                target.cancel.cancel();
+            }
+        }
     }
     pub async fn forward_remote(
         self: &Arc<Self>,
@@ -1207,9 +1336,15 @@ impl Node {
                 }
                 FileOperation::Permissions { path, mode } => {
                     ensure!(mode <= 0o7777, "文件权限无效");
-                    let mut metadata = sftp.metadata(&path).await?;
-                    metadata.permissions = Some(mode);
-                    sftp.set_metadata(path, metadata).await?;
+                    // Only the mode: a stale size, owner or timestamp would be applied too.
+                    sftp.set_metadata(
+                        path,
+                        russh_sftp::protocol::FileAttributes {
+                            permissions: Some(mode),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
                 }
             }
             Ok(())
@@ -1399,12 +1534,34 @@ impl Node {
         let node = self.clone();
         let task = tokio::spawn(async move {
             let mut streams = tokio::task::JoinSet::new();
+            let mut backoff = ACCEPT_BACKOFF_MIN;
             loop {
                 tokio::select! {
                     () = task_cancel.cancelled() => break,
                     Some(_) = streams.join_next(), if !streams.is_empty() => {},
                     accepted = listener.accept() => {
-                        let Ok((mut stream, origin)) = accepted else { break; };
+                        let (mut stream, origin) = match accepted {
+                            Ok(accepted) => {
+                                backoff = ACCEPT_BACKOFF_MIN;
+                                accepted
+                            }
+                            Err(error) if transient_accept_error(&error) => {
+                                // Descriptor exhaustion repeats until streams close; wait instead of spinning.
+                                tracing::debug!(%error, "forward listener accept failed, retrying");
+                                tokio::select! {
+                                    () = task_cancel.cancelled() => break,
+                                    () = tokio::time::sleep(backoff) => {},
+                                }
+                                backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
+                                continue;
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "forward listener stopped");
+                                // Callers observe the forward through this token.
+                                task_cancel.cancel();
+                                break;
+                            }
+                        };
                         if streams.len() >= 128 { continue; }
                         let node = node.clone(); let target = target.clone(); let cancel = task_cancel.clone();
                         streams.spawn(async move {
@@ -1558,6 +1715,41 @@ mod tests {
             "a\nb",
         ] {
             assert!(!recordable_host(host), "{host:?}");
+        }
+    }
+    #[test]
+    fn forward_listeners_retry_only_transient_accept_errors() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+            ErrorKind::Interrupted,
+        ] {
+            assert!(transient_accept_error(&Error::from(kind)), "{kind:?}");
+        }
+        assert!(!transient_accept_error(&Error::from(
+            ErrorKind::InvalidInput
+        )));
+        #[cfg(unix)]
+        {
+            use nix::libc;
+            for code in [
+                libc::EMFILE,
+                libc::ENFILE,
+                libc::ENOBUFS,
+                libc::ECONNABORTED,
+            ] {
+                assert!(
+                    transient_accept_error(&Error::from_raw_os_error(code)),
+                    "{code}"
+                );
+            }
+            for code in [libc::EBADF, libc::EINVAL, libc::ENOTSOCK] {
+                assert!(
+                    !transient_accept_error(&Error::from_raw_os_error(code)),
+                    "{code}"
+                );
+            }
         }
     }
     #[test]

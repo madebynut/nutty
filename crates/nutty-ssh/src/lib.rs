@@ -7,6 +7,8 @@ use nutty_terminal::{shell_integration, terminal};
 
 pub mod remote;
 pub mod sftp_edit;
+#[cfg(test)]
+mod sftp_test_server;
 pub mod ssh_agent;
 
 pub mod transfers;

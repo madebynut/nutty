@@ -1,5 +1,7 @@
 //! Durable transfer checkpoints and bounded, post-order directory manifests.
-use super::endpoint::{self, CHUNK, Directory, Endpoint, File, Kind, LinkKind, Metadata};
+use super::endpoint::{
+    self, CHUNK, Directory, Endpoint, File, Kind, LinkKind, Metadata, Reader, Writer,
+};
 use super::{Direction, Job, Progress, Resolution, State};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -203,7 +205,10 @@ impl Job {
                 match entry.metadata.kind {
                     Kind::Directory => {
                         if entry.finish {
-                            destination.permissions(&dst, &entry.metadata).await?;
+                            // The root keeps a writable mode until it is published.
+                            if !entry.relative.is_empty() {
+                                destination.permissions(&dst, &entry.metadata).await?;
+                            }
                         } else if let Some(meta) = destination.metadata(&dst).await? {
                             ensure!(meta.kind == Kind::Directory, "暂存目录被替换");
                         } else {
@@ -266,9 +271,14 @@ impl Job {
         self.state = State::Publishing;
         self.save(root).await?;
         self.publish_progress(progress, self.bytes, State::Publishing);
-        tokio::time::timeout(Duration::from_secs(30), self.publish(source, destination))
-            .await
-            .context("文件发布超时，可重试核对结果")??;
+        // Hashing an existing target only reads, so pausing may still interrupt it.
+        let found = tokio::select! {
+            biased;
+            () = cancel.cancelled() => { self.state = State::Paused; self.save(root).await?; return Ok(()); },
+            found = destination.fingerprint(self.target()) => found?,
+        };
+        self.publish(source, destination, found).await?;
+        self.apply_root_mode(root, destination).await?;
         self.state = State::Complete;
         self.save(root).await?;
         self.clean_empty_stage(destination).await?;
@@ -337,35 +347,71 @@ impl Job {
         self.conflict = found;
         Ok(())
     }
-    async fn publish(&mut self, source: &Endpoint, destination: &Endpoint) -> Result<()> {
+    /// Commits the stage over a target last seen as `found`. Hashing the target scales
+    /// with its size, so callers take that fingerprint first; the bounded commit then
+    /// re-checks the metadata the hash was verified against before replacing anything.
+    async fn publish(
+        &mut self,
+        source: &Endpoint,
+        destination: &Endpoint,
+        found: Option<endpoint::Fingerprint>,
+    ) -> Result<()> {
         let staged = endpoint::join(&self.stage(), "data");
-        let found = destination.fingerprint(self.target()).await?;
-        if self.resolution == Resolution::ReplaceFile {
-            if found != self.replacement || found.is_none() {
-                self.set_conflict(source, found).await?;
-                anyhow::bail!("目标在传输期间已变化，原文件未替换");
-            }
-            if let Err(error) = destination.replace_file(&staged, self.target()).await {
-                // Only offer a new resolution after proving that rename did not consume
-                // the stage. A lost reply is otherwise reconciled before any new action.
-                if destination
-                    .metadata(&staged)
-                    .await
-                    .is_ok_and(|m| m.is_some())
-                    && let Ok(found) = destination.fingerprint(self.target()).await
-                {
-                    self.set_conflict(source, found).await?;
-                }
-                return Err(error);
-            }
+        let target = self.target().to_owned();
+        let replace = self.resolution == Resolution::ReplaceFile;
+        let changed = if replace {
+            "目标在传输期间已变化，原文件未替换"
         } else {
-            if found.is_some() {
-                self.set_conflict(source, found).await?;
-                anyhow::bail!("目标在传输期间已创建，请选择冲突操作");
+            "目标在传输期间已创建，请选择冲突操作"
+        };
+        if (replace && (found != self.replacement || found.is_none()))
+            || (!replace && found.is_some())
+        {
+            self.set_conflict(source, found).await?;
+            bail!(changed);
+        }
+        let expected = found.map(|found| found.metadata);
+        let committed = tokio::time::timeout(Duration::from_secs(30), async {
+            ensure!(destination.metadata(&target).await? == expected, changed);
+            if replace {
+                destination.replace_file(&staged, &target).await
+            } else {
+                destination.rename(&staged, &target).await
             }
-            destination.rename(&staged, self.target()).await?;
+        })
+        .await
+        .context("文件发布超时，可重试核对结果")?;
+        if let Err(error) = committed {
+            // Only offer a new resolution after proving that the commit did not consume
+            // the stage. A lost reply is otherwise reconciled before any new action.
+            if destination
+                .metadata(&staged)
+                .await
+                .is_ok_and(|m| m.is_some())
+                && let Ok(found) = destination.fingerprint(&target).await
+                && (replace || found.is_some())
+            {
+                self.set_conflict(source, found).await?;
+            }
+            return Err(error);
         }
         self.conflict = None;
+        Ok(())
+    }
+    /// A staged root directory stays owner-writable until it is published: moving a
+    /// directory to another parent rewrites its `..` entry, which needs write access to
+    /// the directory itself. Repeating this after an interrupted publish is harmless.
+    async fn apply_root_mode(&self, root: &Path, destination: &Endpoint) -> Result<()> {
+        let mut plan = tokio::io::BufReader::new(
+            tokio::fs::File::open(self.folder(root).join("plan.jsonl")).await?,
+        );
+        let (entry, _) = read_entry(&mut plan).await?.context("传输清单不完整")?;
+        if entry.metadata.kind == Kind::Directory {
+            destination
+                .permissions(self.target(), &entry.metadata)
+                .await
+                .context("目录已发布，但无法设置其权限，可重试核对结果")?;
+        }
         Ok(())
     }
     async fn ensure_stage(&self, destination: &Endpoint) -> Result<()> {
@@ -466,7 +512,6 @@ impl Job {
             self.publish_progress(progress, self.bytes, State::Verifying);
             verify_prefix(&mut input, &mut output, offset).await?;
         }
-        let mut buffer = vec![0; CHUNK];
         let mut copied = offset;
         let started = tokio::time::Instant::now();
         let chunk = if self.request.limit == 0 {
@@ -474,22 +519,25 @@ impl Job {
         } else {
             (self.request.limit / 10).clamp(1, CHUNK as u64) as usize
         };
-        while copied < metadata.size {
-            let wanted = (metadata.size - copied).min(chunk as u64) as usize;
-            read_exact(&mut input, copied, &mut buffer[..wanted]).await?;
+        let mut reader = Reader::new(&mut input, offset, metadata.size, chunk);
+        let mut writer = Writer::new(&mut output);
+        while let Some(data) = reader.next().await? {
+            let wanted = data.len() as u64;
             if self.request.limit > 0 {
                 tokio::time::sleep_until(
                     started
                         + Duration::from_secs_f64(
-                            (copied - offset + wanted as u64) as f64 / self.request.limit as f64,
+                            (copied - offset + wanted) as f64 / self.request.limit as f64,
                         ),
                 )
                 .await;
             }
-            output.write(copied, &buffer[..wanted]).await?;
-            copied += wanted as u64;
+            writer.write(copied, data).await?;
+            copied += wanted;
             self.publish_progress(progress, self.bytes + copied, State::Running);
         }
+        drop(reader);
+        writer.finish().await?;
         ensure!(
             source
                 .metadata(src)
@@ -517,9 +565,8 @@ impl Job {
             .is_some()
         {
             self.ensure_stage(destination).await?;
-            tokio::time::timeout(Duration::from_secs(30), self.publish(source, destination))
-                .await
-                .context("文件发布超时，可重试核对结果")??;
+            let found = destination.fingerprint(self.target()).await?;
+            self.publish(source, destination, found).await?;
         } else {
             self.publish_progress(progress, self.bytes, State::Verifying);
             let mut plan = tokio::io::BufReader::new(
@@ -545,6 +592,7 @@ impl Job {
                 }
             }
         }
+        self.apply_root_mode(root, destination).await?;
         self.state = State::Complete;
         self.save(root).await?;
         self.clean_empty_stage(destination).await?;
@@ -631,25 +679,13 @@ async fn resolve(endpoint: &Endpoint, path: &str) -> Result<String> {
         .await?;
     Ok(endpoint::join(&parent, name))
 }
-async fn read_exact(file: &mut File, offset: u64, buffer: &mut [u8]) -> Result<()> {
-    let mut pos = 0;
-    while pos < buffer.len() {
-        let n = file.read(offset + pos as u64, &mut buffer[pos..]).await?;
-        ensure!(n > 0, "源文件或分片意外结束");
-        pos += n;
-    }
-    Ok(())
-}
 async fn verify_prefix(source: &mut File, target: &mut File, length: u64) -> Result<()> {
-    let mut a = vec![0; CHUNK];
-    let mut b = vec![0; CHUNK];
-    let mut offset = 0;
-    while offset < length {
-        let n = (length - offset).min(CHUNK as u64) as usize;
-        read_exact(source, offset, &mut a[..n]).await?;
-        read_exact(target, offset, &mut b[..n]).await?;
-        ensure!(a[..n] == b[..n], "源文件或分片已变化，拒绝拼接不同内容");
-        offset += n as u64;
+    let mut a = Reader::new(source, 0, length, CHUNK);
+    let mut b = Reader::new(target, 0, length, CHUNK);
+    // Both readers yield the same chunk boundaries, so each pair covers one range.
+    while let Some(expected) = a.next().await? {
+        let found = b.next().await?.context("源文件或分片意外结束")?;
+        ensure!(expected == found, "源文件或分片已变化，拒绝拼接不同内容");
     }
     Ok(())
 }

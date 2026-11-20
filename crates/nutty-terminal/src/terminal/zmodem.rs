@@ -174,9 +174,17 @@ impl Engine {
                 term,
                 parser,
                 graphics,
+                context,
                 ..
             } = &mut *core;
-            parser.advance(&mut super::screen::Screen { term, graphics }, &bytes);
+            parser.advance(
+                &mut super::screen::Screen {
+                    term,
+                    graphics,
+                    context,
+                },
+                &bytes,
+            );
             core.generation = core.generation.wrapping_add(1);
             core.automation_revision = core.automation_revision.wrapping_add(1);
             drop(core);

@@ -12,7 +12,7 @@ use gpui_kit::base::Disableable as _;
 use gpui_kit::component::{
     IndexPath,
     button::ButtonVariants as _,
-    select::{SelectEvent, SelectState},
+    select::{SelectEvent, SelectItem as _, SelectState},
     switch::Switch,
 };
 use gpui_kit::{
@@ -1262,11 +1262,14 @@ impl WorkspaceView {
                                     )),
                             ),
                     )
+                    // Select's root fills its parent, so the fixed width belongs on a
+                    // wrapper; on the Select itself the row would give it all the space.
                     .children(form.terminal.as_ref().map(|editor| {
-                        crate::controls::select(&editor.clipboard, cx)
-                            .w(px(160.))
-                            .flex_shrink_0()
-                            .accessibility_label(crate::i18n::text("终端程序写入剪贴板"))
+                        div().w(px(160.)).flex_shrink_0().child(
+                            crate::controls::select(&editor.clipboard, cx)
+                                .w_full()
+                                .accessibility_label(crate::i18n::text("终端程序写入剪贴板")),
+                        )
                     })),
             )
             .when(cfg!(target_os = "macos"), |this| {
@@ -2260,22 +2263,14 @@ impl WorkspaceView {
             .iter()
             .filter(|provider| provider.enabled)
             .collect();
-        let mut names: Vec<SharedString> = providers
-            .iter()
-            .map(|provider| provider.name.clone().into())
-            .collect();
-        names.extend(
-            self.store
-                .profile
-                .agents
-                .iter()
-                .filter(|agent| agent.enabled)
-                .map(|agent| format!("ACP: {}", agent.name).into()),
+        let choices = super::assistant::assistant_choices(
+            &self.store.profile.ai_providers,
+            &self.store.profile.agents,
         );
         for pane in self.panes.values_mut() {
-            let name = pane.assistant.provider.read(cx).selected_value();
-            let selected = name
-                .and_then(|name| names.iter().position(|item| item == name))
+            let choice = pane.assistant.provider.read(cx).selected_value();
+            let selected = choice
+                .and_then(|choice| choices.iter().position(|item| item.value() == choice))
                 .unwrap_or(0);
             let mut models = if selected >= providers.len() {
                 vec![SharedString::from("Agent default")]
@@ -2296,7 +2291,7 @@ impl WorkspaceView {
                 .and_then(|model| models.iter().position(|item| item == model))
                 .unwrap_or(0);
             pane.assistant.provider.update(cx, |state, cx| {
-                state.set_items(names.clone().into(), window, cx);
+                state.set_items(choices.clone().into(), window, cx);
                 state.set_selected_index(Some(IndexPath::new(selected)), window, cx);
             });
             pane.assistant.model.update(cx, |state, cx| {

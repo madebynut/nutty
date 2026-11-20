@@ -19,6 +19,12 @@ pub(super) struct Files(
     Arc<Mutex<HashSet<String>>>,
     Arc<Mutex<HashMap<String, u32>>>,
     Arc<std::sync::atomic::AtomicUsize>,
+    /// Milliseconds each `large.bin` read takes.
+    Arc<std::sync::atomic::AtomicU64>,
+    /// Every SETSTAT/FSETSTAT attribute set received, in order.
+    Arc<Mutex<Vec<FileAttributes>>>,
+    /// Largest READ reply in bytes; zero returns what was asked for.
+    Arc<std::sync::atomic::AtomicUsize>,
 );
 
 impl Files {
@@ -30,6 +36,9 @@ impl Files {
             ]))),
             Arc::new(Mutex::new(HashSet::from(["folder".into()]))),
             Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(10)),
+            Arc::new(Mutex::new(Vec::new())),
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         )
     }
@@ -44,6 +53,22 @@ impl Files {
     }
     pub fn fail_reads(&self, count: usize) {
         self.3.store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn slow_reads(&self, delay: std::time::Duration) {
+        self.4.store(
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+    pub async fn insert(&self, name: &str, bytes: Vec<u8>) {
+        self.0.lock().await.insert(name.into(), bytes);
+    }
+    pub async fn setstats(&self) -> Vec<FileAttributes> {
+        self.5.lock().await.clone()
+    }
+    /// Short replies are legal SFTP; clients must request the rest.
+    pub fn short_reads(&self, limit: usize) {
+        self.6.store(limit, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -135,7 +160,10 @@ impl Handler for Sftp {
         }
         // Deliberately slow a large source so cancellation can be verified during a transfer.
         if handle == "large.bin" {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(
+                self.files.4.load(std::sync::atomic::Ordering::SeqCst),
+            ))
+            .await;
         }
         let files = self.files.0.lock().await;
         let bytes = files.get(&handle).ok_or(StatusCode::NoSuchFile)?;
@@ -143,7 +171,11 @@ impl Handler for Sftp {
         if start >= bytes.len() {
             return Err(StatusCode::Eof);
         }
-        let end = start.saturating_add(len as usize).min(bytes.len());
+        let cap = match self.files.6.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => len as usize,
+            cap => cap.min(len as usize),
+        };
+        let end = start.saturating_add(cap).min(bytes.len());
         Ok(Data {
             id,
             data: bytes[start..end].to_vec(),
@@ -225,6 +257,7 @@ impl Handler for Sftp {
         filename: String,
         attributes: FileAttributes,
     ) -> Result<Status, StatusCode> {
+        self.files.5.lock().await.push(attributes.clone());
         if !self.files.0.lock().await.contains_key(&path(&filename))
             && !self.files.1.lock().await.contains(&path(&filename))
         {

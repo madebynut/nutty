@@ -136,6 +136,7 @@ impl WorkspaceView {
                 if events.send(BackendEvent::AgentConfiguration { pane:id, identity, request:None, result }).await.is_err() { break; }
             }
         });
+        self.refresh_agent_login(id, cx);
         cx.notify();
     }
 
@@ -254,6 +255,7 @@ impl WorkspaceView {
                     error.downcast_ref::<crate::acp::LoginRequired>().is_some();
                 state.error = Some(format!("{error:#}"));
                 pane.assistant.session.error = state.error.clone();
+                self.refresh_agent_login(id, cx);
             }
         }
         cx.notify();

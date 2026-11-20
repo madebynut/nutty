@@ -815,3 +815,297 @@ fn windows_device_names_are_rejected_for_downloads() {
         assert!(super::endpoint::valid_name(name).is_ok(), "{name:?}");
     }
 }
+/// A remote endpoint on the in-memory SFTP fixture. Each reply reaches the client
+/// `latency` after the server sends it, while later requests keep flowing, like a
+/// network round trip.
+async fn fixture_remote(files: &crate::sftp_test_server::Files, latency: Duration) -> Endpoint {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (client, relay_client) = tokio::io::duplex(1 << 20);
+    let (relay_server, server) = tokio::io::duplex(1 << 20);
+    russh_sftp::server::run(server, files.handler()).await;
+    let (mut from_client, mut to_client) = tokio::io::split(relay_client);
+    let (mut from_server, mut to_server) = tokio::io::split(relay_server);
+    tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut from_client, &mut to_server).await;
+    });
+    let (delayed, mut arriving) = mpsc::unbounded_channel::<(tokio::time::Instant, Vec<u8>)>();
+    tokio::spawn(async move {
+        let mut buffer = vec![0; 64 * 1024];
+        while let Ok(n @ 1..) = from_server.read(&mut buffer).await {
+            let due = tokio::time::Instant::now() + latency;
+            if delayed.send((due, buffer[..n].to_vec())).is_err() {
+                break;
+            }
+        }
+    });
+    tokio::spawn(async move {
+        while let Some((due, bytes)) = arriving.recv().await {
+            tokio::time::sleep_until(due).await;
+            if to_client.write_all(&bytes).await.is_err() {
+                break;
+            }
+        }
+    });
+    Endpoint::Remote(Arc::new(russh_sftp::client::RawSftpSession::new(client)))
+}
+async fn initialized(endpoint: Endpoint) -> Result<Endpoint> {
+    if let Endpoint::Remote(session) = &endpoint {
+        session.init().await?;
+    }
+    Ok(endpoint)
+}
+#[tokio::test(start_paused = true)]
+async fn replacing_a_large_remote_target_hashes_it_outside_the_commit_timeout() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let files = crate::sftp_test_server::Files::seeded();
+    // 128 sequential 32 KiB reads of the 4 MiB target take 38 s, beyond the 30 s commit.
+    files.slow_reads(Duration::from_millis(300));
+    let remote = initialized(fixture_remote(&files, Duration::ZERO).await).await?;
+    let source = dir.path().join("replacement");
+    tokio::fs::write(&source, b"replacement").await?;
+    let mut job = fixture(dir.path(), &source, Path::new("/large.bin")).await?;
+    let (progress, cancel) = (progress(), CancellationToken::new());
+    assert!(
+        job.execute(dir.path(), &Endpoint::Local, &remote, &progress, &cancel)
+            .await
+            .is_err(),
+        "the existing file is a conflict"
+    );
+    job.resolution = Resolution::ReplaceFile;
+    job.replacement = job.conflict.take();
+    job.execute(dir.path(), &Endpoint::Local, &remote, &progress, &cancel)
+        .await?;
+    assert_eq!(job.state, State::Complete);
+    assert_eq!(
+        files.snapshot().await.get("large.bin").map(Vec::as_slice),
+        Some(&b"replacement"[..])
+    );
+    Ok(())
+}
+#[tokio::test(start_paused = true)]
+async fn remote_transfers_keep_several_requests_in_flight() -> Result<()> {
+    const ROUND_TRIP: Duration = Duration::from_millis(50);
+    let dir = tempfile::tempdir()?;
+    let files = crate::sftp_test_server::Files::seeded();
+    let payload: Vec<u8> = (0..4 * 1024 * 1024).map(|i: u32| (i % 251) as u8).collect();
+    files.insert("data.bin", payload.clone()).await;
+    let chunks = (payload.len() / super::endpoint::CHUNK) as u32;
+    let sequential = ROUND_TRIP * chunks;
+    let remote = initialized(fixture_remote(&files, ROUND_TRIP).await).await?;
+    // Downloads prefetch reads. Short replies are filled in before later chunks.
+    for (name, short) in [("short", 20 * 1024), ("downloaded", 0)] {
+        files.short_reads(short);
+        let target = dir.path().join(name);
+        let mut job = fixture(dir.path(), &target, Path::new("/data.bin")).await?;
+        job.request.direction = Direction::Download;
+        let started = tokio::time::Instant::now();
+        job.execute(
+            dir.path(),
+            &remote,
+            &Endpoint::Local,
+            &progress(),
+            &CancellationToken::new(),
+        )
+        .await?;
+        assert_eq!(tokio::fs::read(&target).await?, payload);
+        assert!(
+            short > 0 || started.elapsed() < sequential / 2,
+            "download took {:?}; one chunk per round trip takes {sequential:?}",
+            started.elapsed()
+        );
+    }
+    let target = dir.path().join("downloaded");
+    // Uploads keep writes in flight; resuming verifies the remote prefix the same way.
+    let mut job = fixture(dir.path(), &target, Path::new("/uploaded.bin")).await?;
+    let cancel = CancellationToken::new();
+    let pausing = cancel.clone();
+    let p = progress();
+    let mut rx = p.subscribe();
+    tokio::spawn(async move {
+        while rx.changed().await.is_ok() {
+            if rx.borrow().bytes >= 1024 * 1024 {
+                pausing.cancel();
+                break;
+            }
+        }
+    });
+    job.execute(dir.path(), &Endpoint::Local, &remote, &p, &cancel)
+        .await?;
+    assert_eq!(job.state, State::Paused);
+    let started = tokio::time::Instant::now();
+    job.execute(
+        dir.path(),
+        &Endpoint::Local,
+        &remote,
+        &progress(),
+        &CancellationToken::new(),
+    )
+    .await?;
+    assert_eq!(job.state, State::Complete);
+    assert_eq!(
+        files.snapshot().await.get("uploaded.bin"),
+        Some(&payload),
+        "the resumed upload publishes the exact bytes"
+    );
+    assert!(
+        started.elapsed() < sequential / 2,
+        "verified resume took {:?}; one chunk per round trip takes {sequential:?}",
+        started.elapsed()
+    );
+    Ok(())
+}
+#[tokio::test(start_paused = true)]
+async fn slow_links_keep_every_request_inside_the_request_timeout() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let files = crate::sftp_test_server::Files::seeded();
+    // About 13 KiB/s: one 32 KiB read takes 2.5 s, which one request at a time
+    // always handled. Sixteen queued requests would wait 40 s for the last reply.
+    files.slow_reads(Duration::from_millis(2500));
+    let remote = initialized(fixture_remote(&files, Duration::ZERO).await).await?;
+    if let Endpoint::Remote(session) = &remote {
+        session.set_timeout(30);
+    }
+    let target = dir.path().join("downloaded");
+    let mut job = fixture(dir.path(), &target, Path::new("/large.bin")).await?;
+    job.request.direction = Direction::Download;
+    job.execute(
+        dir.path(),
+        &remote,
+        &Endpoint::Local,
+        &progress(),
+        &CancellationToken::new(),
+    )
+    .await?;
+    assert_eq!(job.state, State::Complete);
+    assert_eq!(tokio::fs::read(&target).await?, vec![42; 4 * 1024 * 1024]);
+    Ok(())
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn read_only_directories_are_published_with_their_mode() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join("src");
+    std::fs::create_dir_all(source.join("nested"))?;
+    std::fs::write(source.join("nested/a.txt"), b"x")?;
+    for path in [source.join("nested"), source.clone()] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555))?;
+    }
+    let target = dir.path().join("copy");
+    let mut job = fixture(dir.path(), &source, &target).await?;
+    let result = job
+        .execute(
+            dir.path(),
+            &Endpoint::Local,
+            &Endpoint::Local,
+            &progress(),
+            &CancellationToken::new(),
+        )
+        .await;
+    let modes = [target.clone(), target.join("nested")].map(|path| {
+        std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o777)
+            .ok()
+    });
+    // Let the temporary directory be removed.
+    for path in [
+        source.clone(),
+        source.join("nested"),
+        target.clone(),
+        target.join("nested"),
+    ] {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+    }
+    result?;
+    assert_eq!(job.state, State::Complete);
+    assert_eq!(modes, [Some(0o555), Some(0o555)]);
+    assert_eq!(tokio::fs::read(target.join("nested/a.txt")).await?, b"x");
+    assert!(!dir.path().join(format!(".nutty-{}.part", job.id)).exists());
+    Ok(())
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn local_modes_from_a_peer_respect_the_umask_and_drop_special_bits() -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let dir = tempfile::tempdir()?;
+    // What the OS grants a new file asked for 0o777, measured independently.
+    let probe = dir.path().join("probe");
+    let allowed = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o777)
+        .open(&probe)?
+        .metadata()?
+        .permissions()
+        .mode()
+        & 0o777;
+    let target = dir.path().join("file");
+    std::fs::write(&target, b"x")?;
+    let metadata = super::endpoint::Metadata {
+        kind: super::endpoint::Kind::File,
+        size: 1,
+        modified: None,
+        mode: Some(0o4777),
+    };
+    Endpoint::Local
+        .permissions(target.to_str().context("path")?, &metadata)
+        .await?;
+    assert_eq!(
+        std::fs::metadata(&target)?.permissions().mode() & 0o7777,
+        allowed
+    );
+    Ok(())
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn a_job_that_cannot_be_saved_fails_alone_and_the_queue_keeps_running() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("transfers");
+    let mut job = fixture(&root, &dir.path().join("local"), Path::new("/remote")).await?;
+    job.state = State::Paused;
+    job.save(&root).await?;
+    let (prompts, _) = async_channel::bounded(1);
+    let registry = Arc::new(crate::remote::Registry::new(dir.path(), prompts));
+    let configuration = Configuration {
+        connections: Vec::new(),
+        proxies: Vec::new(),
+        concurrency: 1,
+        limit: 0,
+    };
+    let (queue, mut updates) = Queue::start(dir.path().into(), registry, configuration);
+    let mut wait = async |predicate: &dyn Fn(&Snapshot) -> bool| {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = updates.borrow_and_update().clone();
+                if predicate(&snapshot) {
+                    return Ok::<_, anyhow::Error>(snapshot);
+                }
+                updates.changed().await?;
+            }
+        })
+        .await?
+    };
+    wait(&|s| s.tasks.len() == 1).await?;
+    let folder = job.folder(&root);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500))?;
+    queue.action(job.id, Action::Resume)?;
+    let snapshot = wait(&|s| s.tasks.iter().any(|t| t.state == State::Failed)).await;
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))?;
+    let snapshot = snapshot?;
+    assert_eq!(snapshot.error, None, "the queue itself stays available");
+    assert!(
+        snapshot.tasks[0]
+            .error
+            .as_ref()
+            .is_some_and(|e| e.starts_with("无法保存传输状态"))
+    );
+    // Later commands still reach the same queue.
+    queue.action(job.id, Action::Cancel)?;
+    wait(&|s| s.tasks.first().is_some_and(|t| t.state == State::Canceled)).await?;
+    queue.action(job.id, Action::Remove)?;
+    wait(&|s| s.tasks.is_empty()).await?;
+    assert!(!folder.exists());
+    queue.shutdown().await;
+    Ok(())
+}

@@ -1,5 +1,9 @@
 //! Streaming filesystem operations; symbolic links are never traversed.
 use anyhow::{Context as _, Result, bail, ensure};
+use futures_util::{
+    FutureExt as _, StreamExt as _,
+    stream::{FuturesOrdered, FuturesUnordered},
+};
 use russh_sftp::{
     client::{RawSftpSession, error::Error},
     protocol::{FileAttributes, OpenFlags, Packet, StatusCode},
@@ -7,7 +11,7 @@ use russh_sftp::{
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::path::Path;
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
 /// A protocol-sized buffer bounds each transfer independently of file size.
@@ -197,6 +201,180 @@ impl File {
         Ok(())
     }
 }
+/// SFTP requests kept in flight per remote file, so a sequential transfer is not
+/// limited to one chunk per round trip. Bounds buffered data to `PIPELINE * CHUNK`.
+const PIPELINE: usize = 16;
+type Pending<T> = Pin<Box<dyn Future<Output = Result<(T, Duration)>> + Send>>;
+/// How many requests may be in flight. Each SFTP request's timeout runs from when it
+/// is sent, and on a bandwidth-bound link a request waits behind every chunk sent
+/// before it. So the window starts at one request, as before pipelining, grows while
+/// replies return quickly (high latency, ample bandwidth) and shrinks when they slow
+/// down, keeping each request far inside the 30 s request timeout.
+struct Window(usize);
+impl Window {
+    const GROW_BELOW: Duration = Duration::from_secs(5);
+    const SHRINK_ABOVE: Duration = Duration::from_secs(10);
+    fn new() -> Self {
+        Self(1)
+    }
+    fn get(&self) -> usize {
+        self.0
+    }
+    fn observe(&mut self, elapsed: Duration) {
+        if elapsed < Self::GROW_BELOW {
+            self.0 = (self.0 * 2).min(PIPELINE);
+        } else if elapsed > Self::SHRINK_ABOVE {
+            self.0 = (self.0 / 2).max(1);
+        }
+    }
+}
+/// Runs `request`, timing it from its first poll, which is when it is sent.
+fn timed<T: Send + 'static>(
+    request: impl Future<Output = Result<T>> + Send + 'static,
+) -> Pending<T> {
+    Box::pin(async move {
+        let sent = tokio::time::Instant::now();
+        let value = request.await?;
+        Ok((value, sent.elapsed()))
+    })
+}
+async fn read_at(
+    session: Arc<RawSftpSession>,
+    handle: String,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>> {
+    match session.read(handle, offset, len as u32).await {
+        Ok(data) => {
+            ensure!(
+                !data.data.is_empty() && data.data.len() <= len,
+                "无效的 SFTP 数据块"
+            );
+            Ok(data.data)
+        }
+        Err(Error::Status(status)) if status.status_code == StatusCode::Eof => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+/// Reads a byte range in order as chunks of a fixed size, prefetching remote chunks.
+pub(super) struct Reader<'a> {
+    file: &'a mut File,
+    position: u64,
+    requested: u64,
+    end: u64,
+    chunk: usize,
+    ended: &'static str,
+    pending: FuturesOrdered<Pending<(u64, usize, Vec<u8>)>>,
+    window: Window,
+}
+impl<'a> Reader<'a> {
+    pub fn new(file: &'a mut File, start: u64, end: u64, chunk: usize) -> Self {
+        Self {
+            file,
+            position: start,
+            requested: start,
+            end,
+            chunk: chunk.clamp(1, CHUNK),
+            ended: "源文件或分片意外结束",
+            pending: FuturesOrdered::new(),
+            window: Window::new(),
+        }
+    }
+    /// The error reported when the file is shorter than the range.
+    pub fn ended(mut self, message: &'static str) -> Self {
+        self.ended = message;
+        self
+    }
+    /// The next `min(chunk, remaining)` bytes, or `None` at the end of the range.
+    /// A file shorter than the range is an error.
+    pub async fn next(&mut self) -> Result<Option<Vec<u8>>> {
+        if self.position >= self.end {
+            return Ok(None);
+        }
+        let wanted = (self.end - self.position).min(self.chunk as u64) as usize;
+        let File::Remote { session, handle } = &*self.file else {
+            let mut data = vec![0; wanted];
+            let mut filled = 0;
+            while filled < wanted {
+                let n = self
+                    .file
+                    .read(self.position + filled as u64, &mut data[filled..])
+                    .await?;
+                ensure!(n > 0, "{}", self.ended);
+                filled += n;
+            }
+            self.position += wanted as u64;
+            return Ok(Some(data));
+        };
+        while self.pending.len() < self.window.get() && self.requested < self.end {
+            let len = (self.end - self.requested).min(self.chunk as u64) as usize;
+            let (session, handle, offset) = (session.clone(), handle.clone(), self.requested);
+            self.pending.push_back(timed(async move {
+                Ok((offset, len, read_at(session, handle, offset, len).await?))
+            }));
+            self.requested += len as u64;
+        }
+        let ((offset, len, mut data), elapsed) =
+            self.pending.next().await.context(self.ended)??;
+        self.window.observe(elapsed);
+        // A short reply is legal; fill the gap before any prefetched chunk is used.
+        while data.len() < len {
+            let more = read_at(
+                session.clone(),
+                handle.clone(),
+                offset + data.len() as u64,
+                len - data.len(),
+            )
+            .await?;
+            ensure!(!more.is_empty(), "{}", self.ended);
+            data.extend_from_slice(&more);
+        }
+        self.position += len as u64;
+        Ok(Some(data))
+    }
+}
+/// Writes chunks at explicit offsets, keeping remote writes in flight until `finish`.
+pub(super) struct Writer<'a> {
+    file: &'a mut File,
+    pending: FuturesUnordered<Pending<()>>,
+    window: Window,
+}
+impl<'a> Writer<'a> {
+    pub fn new(file: &'a mut File) -> Self {
+        Self {
+            file,
+            pending: FuturesUnordered::new(),
+            window: Window::new(),
+        }
+    }
+    pub async fn write(&mut self, offset: u64, bytes: Vec<u8>) -> Result<()> {
+        let File::Remote { session, handle } = &*self.file else {
+            return self.file.write(offset, &bytes).await;
+        };
+        let (session, handle) = (session.clone(), handle.clone());
+        self.pending.push(timed(async move {
+            session.write(handle, offset, bytes).await?;
+            Ok(())
+        }));
+        // Polling once sends the request now and collects acknowledgements that arrived.
+        while let Some(Some(result)) = self.pending.next().now_or_never() {
+            self.window.observe(result?.1);
+        }
+        while self.pending.len() >= self.window.get() {
+            if let Some(result) = self.pending.next().await {
+                self.window.observe(result?.1);
+            }
+        }
+        Ok(())
+    }
+    /// Waits for every acknowledgement; only then is the written range durable to flush.
+    pub async fn finish(mut self) -> Result<()> {
+        while let Some(result) = self.pending.next().await {
+            result?;
+        }
+        Ok(())
+    }
+}
 impl Directory {
     pub async fn close(mut self) -> Result<()> {
         if let Self::Remote {
@@ -262,15 +440,11 @@ impl Endpoint {
         };
         let sha256 = if metadata.kind == Kind::File {
             let mut file = self.open(path, false).await?;
-            let mut buffer = vec![0; CHUNK];
             let mut hasher = Sha256::new();
-            let mut offset = 0;
-            while offset < metadata.size {
-                let wanted = (metadata.size - offset).min(CHUNK as u64) as usize;
-                let n = file.read(offset, &mut buffer[..wanted]).await?;
-                ensure!(n > 0, "目标在校验期间被截断");
-                hasher.update(&buffer[..n]);
-                offset += n as u64;
+            let mut reader =
+                Reader::new(&mut file, 0, metadata.size, CHUNK).ended("目标在校验期间被截断");
+            while let Some(chunk) = reader.next().await? {
+                hasher.update(&chunk);
             }
             file.close().await?;
             ensure!(
@@ -531,8 +705,16 @@ impl Endpoint {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt as _;
-                        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-                            .await?;
+                        let path = path.to_owned();
+                        // Like cp and sftp, a peer's mode never widens what the umask
+                        // allows locally, and never carries setuid, setgid or sticky bits.
+                        tokio::task::spawn_blocking(move || {
+                            std::fs::set_permissions(
+                                path,
+                                std::fs::Permissions::from_mode(mode & creation_mode()),
+                            )
+                        })
+                        .await??;
                     }
                 }
                 Self::Remote(s) => {
@@ -641,6 +823,33 @@ impl Endpoint {
     }
 }
 
+/// Permission bits the process umask leaves on a new file (`0o777 & !umask`).
+///
+/// umask(2) can only be read by setting it, which briefly changes it for every
+/// thread in the process. Instead the OS applies it to a probe file created with
+/// mode 0o777. The umask of a running app is treated as fixed after the first use;
+/// if the probe fails, group and other write access are withheld.
+#[cfg(unix)]
+pub(super) fn creation_mode() -> u32 {
+    static MODE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let path = std::env::temp_dir().join(format!(".nutty-umask-{}", uuid::Uuid::new_v4()));
+        let Ok(file) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o777)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&path)
+        else {
+            return 0o755;
+        };
+        let mode = file.metadata().map(|m| m.permissions().mode() & 0o777);
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        mode.unwrap_or(0o755)
+    })
+}
 pub(super) fn valid_name(name: &str) -> Result<()> {
     ensure!(
         !name.is_empty()

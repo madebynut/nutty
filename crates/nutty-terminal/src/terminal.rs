@@ -25,6 +25,7 @@ use portable_pty::{CommandBuilder, PtySize};
 use crate::{config::Preferences, theme::Palette};
 
 mod bootstrap_echo;
+mod context;
 mod graphics;
 pub use graphics::{DisplayImage, Raster};
 mod inline_images;
@@ -99,6 +100,8 @@ struct Core {
     decoder: protocol::Decoder,
     shell: shell::Shell,
     graphics: graphics::Graphics,
+    /// Model context starts at the current target's output, not an earlier host's.
+    context: context::SessionStart,
     cell: (f32, f32),
     journal: Option<crate::journal::Recorder>,
     history: crate::journal::CommandHistory,
@@ -188,6 +191,7 @@ impl Terminal {
                 decoder: protocol::Decoder::default(),
                 shell: shell::Shell::new(preferences.track_directory),
                 graphics: graphics::Graphics::default(),
+                context: Default::default(),
                 cell: (8., 21.),
                 journal: crate::journal::Recorder::new(id, preferences),
                 history: Default::default(),
@@ -325,8 +329,22 @@ impl Drop for Terminal {
 
 impl Engine {
     pub fn set_environment(&self, environment: crate::session_environment::Environment) {
+        if environment.target == crate::session_environment::Target::Local {
+            // Looked up here so that identifying a target while parsing output stays cheap.
+            local_host_label();
+        }
         self.flush_bootstrap_echo();
         let mut core = self.core.lock().expect("terminal state lock poisoned");
+        // A reconnect from a jump target lands on the gateway, not on that target.
+        if core
+            .shell
+            .target
+            .as_ref()
+            .is_some_and(|target| !target.transport_bound)
+        {
+            // Marked after the `[reconnected]` notice that follows.
+            core.context.defer();
+        }
         core.environment = environment;
         core.shell.reset_location();
         core.shell.bootstrap_input_pending = false;
@@ -409,7 +427,9 @@ impl Engine {
             .collect();
         let previous_directory = core.shell.directory.clone();
         let previous_target = core.shell.target.clone();
-        if let Some(command) = core.shell.probe_command(&prompt) {
+        let command = core.shell.probe_command(&prompt);
+        mark_target_switch(&mut core, previous_target.as_ref().map(|target| target.id));
+        if let Some(command) = command {
             let echo = bootstrap_echo::Echo::new(&command, core.term.columns(), point.column.0);
             if self
                 .commands
@@ -506,10 +526,16 @@ impl Engine {
             return;
         }
         let mut new = self.core.lock().expect("terminal state lock poisoned");
+        let from_jump_target = old
+            .shell
+            .target
+            .as_ref()
+            .is_some_and(|target| !target.transport_bound);
         std::mem::swap(&mut new.term, &mut old.term);
         std::mem::swap(&mut new.events, &mut old.events);
         std::mem::swap(&mut new.parser, &mut old.parser);
         std::mem::swap(&mut new.graphics, &mut old.graphics);
+        std::mem::swap(&mut new.context, &mut old.context);
         new.graphics.allow_files = false;
         new.clipboard_copy = None;
         new.clipboard_paste = None;
@@ -535,7 +561,13 @@ impl Engine {
         new.automation_revision = old.automation_revision.wrapping_add(1);
         drop(new);
         drop(old);
-        self.feed(b"\r\n\x1b[0m[reconnected]\r\n");
+        // The previous connection's full-screen program is gone, as in `resume`.
+        self.feed(b"\x1b[?1049l\r\n\x1b[0m[reconnected]\r\n");
+        if from_jump_target {
+            let mut core = self.core.lock().expect("terminal state lock poisoned");
+            let Core { term, context, .. } = &mut *core;
+            context.mark(term);
+        }
     }
     pub fn feed(&self, bytes: &[u8]) {
         let mut decodes = Vec::new();
@@ -566,13 +598,23 @@ impl Engine {
                         term,
                         parser,
                         graphics,
+                        context,
                         ..
                     } = &mut *core;
-                    parser.advance(&mut screen::Screen { term, graphics }, data);
+                    parser.advance(
+                        &mut screen::Screen {
+                            term,
+                            graphics,
+                            context,
+                        },
+                        data,
+                    );
                 }
                 protocol::Part::Osc(data) => {
                     let cursor = core.term.grid().cursor.point;
+                    let target = target_id(&core);
                     core.shell.osc(data, cursor);
+                    mark_target_switch(&mut core, target);
                     if data.starts_with(b"1337;") {
                         let alternate = core.term.mode().contains(TermMode::ALT_SCREEN);
                         let cell = core.cell;
@@ -588,10 +630,22 @@ impl Engine {
                         }
                         return;
                     }
-                    let Core { term, parser, .. } = &mut *core;
-                    parser.advance(term, b"\x1b]");
-                    parser.advance(term, data);
-                    parser.advance(term, b"\x07");
+                    // An escape inside the string ends it and starts a sequence of its own.
+                    let Core {
+                        term,
+                        parser,
+                        graphics,
+                        context,
+                        ..
+                    } = &mut *core;
+                    let mut screen = screen::Screen {
+                        term,
+                        graphics,
+                        context,
+                    };
+                    parser.advance(&mut screen, b"\x1b]");
+                    parser.advance(&mut screen, data);
+                    parser.advance(&mut screen, b"\x07");
                 }
                 protocol::Part::Apc(data) => {
                     if let Some(data) = data.strip_prefix(b"G") {
@@ -614,8 +668,17 @@ impl Engine {
                         }
                         if outcome.move_rows > 0 {
                             let rows = outcome.move_rows.min(core.term.screen_lines());
-                            let Core { term, graphics, .. } = &mut *core;
-                            let mut screen = screen::Screen { term, graphics };
+                            let Core {
+                                term,
+                                graphics,
+                                context,
+                                ..
+                            } = &mut *core;
+                            let mut screen = screen::Screen {
+                                term,
+                                graphics,
+                                context,
+                            };
                             use alacritty_terminal::vte::ansi::Handler as _;
                             for _ in 0..rows {
                                 screen.linefeed();
@@ -643,14 +706,27 @@ impl Engine {
                             apply_inline_image(&mut core, outcome, &mut decodes);
                         }
                     } else {
-                        let Core { term, parser, .. } = &mut *core;
-                        parser.advance(term, b"\x1bP");
-                        parser.advance(term, data);
-                        parser.advance(term, b"\x1b\\");
+                        let Core {
+                            term,
+                            parser,
+                            graphics,
+                            context,
+                            ..
+                        } = &mut *core;
+                        let mut screen = screen::Screen {
+                            term,
+                            graphics,
+                            context,
+                        };
+                        parser.advance(&mut screen, b"\x1bP");
+                        parser.advance(&mut screen, data);
+                        parser.advance(&mut screen, b"\x1b\\");
                     }
                 }
             });
             core.decoder = decoder;
+            let Core { term, context, .. } = &mut *core;
+            context.settle(term);
             core.generation = core.generation.wrapping_add(1);
             core.automation_revision = core.automation_revision.wrapping_add(1);
             if !bytes.is_empty() {
@@ -894,7 +970,11 @@ impl Engine {
             .context("terminal resize queue unavailable")?;
         let mut core = self.core.lock().expect("terminal state lock poisoned");
         let was_empty = !core.awaiting_echo && empty_prompt(&core);
+        let columns = core.term.columns();
+        let logical = core.context.before_resize(&core.term);
         core.term.resize(size);
+        let Core { term, context, .. } = &mut *core;
+        context.after_resize(term, logical, term.columns() != columns);
         if was_empty && core.shell.integrated {
             core.shell.prompt = Some(core.term.grid().cursor.point);
         }
@@ -932,6 +1012,9 @@ impl Engine {
             .context("terminal input queue unavailable")?;
         if empty_enter {
             core.shell.retry_after_empty_enter();
+        }
+        if enter {
+            core.shell.command_submitted();
         }
         if enter || interrupt {
             core.shell.input_pending = false;
@@ -1029,12 +1112,18 @@ impl Engine {
         Ok(())
     }
 
-    /// Reads recent parsed output, independent of the user's current scroll position.
+    /// Reads recent parsed output of the current target session, independent of the
+    /// user's scroll position. Output from a host shown earlier in this pane is excluded.
     pub fn recent_output(&self) -> String {
         const LIMIT: usize = 32 * 1024;
         let core = self.core.lock().expect("terminal state lock poisoned");
         let bottom = core.term.screen_lines() as i32 - 1;
-        let top = (bottom - 119).max(core.term.topmost_line().0);
+        let session = (!core.term.mode().contains(TermMode::ALT_SCREEN))
+            .then(|| core.context.row(&core.term))
+            .flatten();
+        let top = (bottom - (context::CONTEXT_ROWS - 1))
+            .max(core.term.topmost_line().0)
+            .max(session.unwrap_or(i32::MIN));
         let mut lines = Vec::new();
         let mut bytes = 0;
         for row in (top..=bottom).rev() {
@@ -1094,6 +1183,7 @@ impl Engine {
         }
         core.term.selection = None;
         core.search = None;
+        core.context.clear();
         let allow_files = core.graphics.allow_files;
         core.graphics = graphics::Graphics::default();
         core.graphics.allow_files = allow_files;
@@ -1348,6 +1438,7 @@ fn apply_inline_image(
     let mut screen = screen::Screen {
         term: &mut core.term,
         graphics: &mut core.graphics,
+        context: &mut core.context,
     };
     use alacritty_terminal::vte::ansi::Handler as _;
     for _ in 0..outcome.move_rows {
@@ -1415,6 +1506,93 @@ fn decode_image(
             let _ = job.commands.try_send(Command::Input(response.into_bytes()));
         }
     }
+}
+
+fn target_id(core: &Core) -> Option<uuid::Uuid> {
+    core.shell.target.as_ref().map(|target| target.id)
+}
+
+/// A different user@host than before starts a new session for model context; the first
+/// identification of a pane's target does not, unless a local pane first identifies another
+/// machine. A seeded SSH alias or IP replaced by the host's own name also counts, which only
+/// hides that host's login banner.
+fn mark_target_switch(core: &mut Core, previous: Option<uuid::Uuid>) {
+    let current = target_id(core);
+    let switched = if previous.is_some() {
+        current.is_some() && current != previous
+    } else {
+        core.environment.target == crate::session_environment::Target::Local
+            && core
+                .shell
+                .target
+                .as_ref()
+                .is_some_and(|target| !is_local_machine(&target.name))
+    };
+    if switched {
+        let Core { term, context, .. } = core;
+        context.mark(term);
+    }
+}
+
+/// Whether `user@host` names this machine. Prompts and titles usually show the host up to
+/// its first dot, so only that label is compared; any user counts, as `su` or `sudo -s` stays
+/// on the same host.
+fn is_local_machine(target: &str) -> bool {
+    let host = shell::host_label(target);
+    host == "localhost" || local_host_label().is_some_and(|local| *local == host)
+}
+
+/// First label of this machine's hostname, looked up once per process.
+fn local_host_label() -> Option<&'static String> {
+    static LABEL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LABEL
+        .get_or_init(|| {
+            #[cfg(unix)]
+            let host = nix::sys::utsname::uname()
+                .ok()
+                .and_then(|system| system.nodename().to_str().map(str::to_owned));
+            // COMPUTERNAME is the NetBIOS name, upper-cased and cut to 15 characters.
+            #[cfg(windows)]
+            let host = windows_dns_hostname().or_else(|| std::env::var("COMPUTERNAME").ok());
+            #[cfg(not(any(unix, windows)))]
+            let host = None::<String>;
+            let label = shell::host_label(&host?);
+            (!label.is_empty()).then_some(label)
+        })
+        .as_ref()
+}
+
+#[cfg(windows)]
+fn windows_dns_hostname() -> Option<String> {
+    use windows_sys::Win32::System::SystemInformation::{
+        ComputerNamePhysicalDnsHostname, GetComputerNameExW,
+    };
+    let mut size = 0u32;
+    // SAFETY: A null buffer with size 0 only asks for the required size.
+    unsafe {
+        GetComputerNameExW(
+            ComputerNamePhysicalDnsHostname,
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    if size == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; size as usize];
+    // SAFETY: `buffer` holds `size` UTF-16 units and lives through the call.
+    let read = unsafe {
+        GetComputerNameExW(
+            ComputerNamePhysicalDnsHostname,
+            buffer.as_mut_ptr(),
+            &mut size,
+        )
+    };
+    if read == 0 {
+        return None;
+    }
+    buffer.truncate(size as usize);
+    String::from_utf16(&buffer).ok()
 }
 
 fn record_command(core: &mut Core, command: &str) {
@@ -2239,6 +2417,569 @@ mod tests {
             terminal.engine.send_command("pwd").is_err(),
             "clearing must not fabricate an empty prompt"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn output_context_starts_at_the_current_target_after_scroll_clear_and_reflow() -> Result<()> {
+        let (terminal, _input) = Terminal::channel(&Preferences::default(), "gateway".into());
+        terminal.engine.feed(b"local-before-title\r\n");
+        terminal.engine.feed(b"\x1b]0;admin@alpha: ~\x07");
+        assert!(
+            terminal
+                .engine
+                .recent_output()
+                .contains("local-before-title"),
+            "the first identification of a remote pane's target is not a switch"
+        );
+        let long = "alpha-wrapped-".repeat(20);
+        terminal
+            .engine
+            .feed(format!("alpha-secret-1\r\n{long}\r\nadmin@alpha:~$ exit\r\n").as_bytes());
+        terminal
+            .engine
+            .feed(b"\x1b]0;admin@beta: ~\x07admin@beta:~$ uptime\r\nbeta-load\r\n");
+        let context = terminal.engine.recent_output();
+        assert!(context.contains("admin@beta:~$ uptime") && context.contains("beta-load"));
+        assert!(
+            !context.contains("alpha-secret-1") && !context.contains("alpha-wrapped"),
+            "{context}"
+        );
+        for index in 0..45 {
+            terminal
+                .engine
+                .feed(format!("beta-{index:02}\r\n").as_bytes());
+        }
+        let context = terminal.engine.recent_output();
+        assert!(context.contains("beta-load") && context.contains("beta-44"));
+        assert!(
+            !context.contains("alpha"),
+            "start follows rows into scrollback"
+        );
+        terminal.engine.resize(TermSize {
+            columns: 30,
+            rows: 12,
+        })?;
+        let context = terminal.engine.recent_output();
+        assert!(context.contains("beta-load") && context.contains("beta-44"));
+        assert!(
+            !context.contains("alpha"),
+            "start follows reflow: {context}"
+        );
+        terminal.engine.resize(TermSize::default())?;
+        assert!(!terminal.engine.recent_output().contains("alpha"));
+        terminal.engine.feed(b"\x1b[H\x1b[2J");
+        let context = terminal.engine.recent_output();
+        assert!(context.contains("beta-44") && !context.contains("alpha"));
+        terminal.engine.feed(b"\x1b[3Jbeta-after-clear\r\n");
+        let context = terminal.engine.recent_output();
+        assert!(context.contains("beta-after-clear") && !context.contains("alpha"));
+        // Returning to the first host is another switch.
+        terminal
+            .engine
+            .feed(b"\x1b]0;admin@alpha: ~\x07alpha-again\r\n");
+        let context = terminal.engine.recent_output();
+        assert!(context.contains("alpha-again") && !context.contains("beta"));
+        terminal.engine.feed(b"\x1bc");
+        terminal.engine.feed(b"after-reset\r\n");
+        assert!(terminal.engine.recent_output().contains("after-reset"));
+        Ok(())
+    }
+
+    #[test]
+    fn alternate_screen_cursor_jumps_and_reconnects_keep_the_session_start() -> Result<()> {
+        let switched = || {
+            let (terminal, input) = Terminal::channel(&Preferences::default(), "gw".into());
+            terminal
+                .engine
+                .feed(b"\x1b]0;admin@alpha: ~\x07alpha-secret\r\n");
+            terminal
+                .engine
+                .feed(b"\x1b]0;admin@beta: ~\x07beta-start\r\n");
+            for index in 0..60 {
+                terminal
+                    .engine
+                    .feed(format!("beta-{index:02}\r\n").as_bytes());
+            }
+            (terminal, input)
+        };
+        let (terminal, _input) = switched();
+        terminal.engine.feed(b"\x1b[?1049hvim");
+        terminal.engine.resize(TermSize {
+            columns: 60,
+            rows: 40,
+        })?;
+        terminal.engine.feed(b"\x1b[3J\x1b[?1049l");
+        let context = terminal.engine.recent_output();
+        assert!(context.contains("beta-59"));
+        assert!(
+            !context.contains("alpha-secret"),
+            "full-screen programs cannot reset the primary session start"
+        );
+        let (terminal, _input) = switched();
+        terminal.engine.feed(b"\x1b[H");
+        terminal.engine.resize(TermSize {
+            columns: 40,
+            rows: 20,
+        })?;
+        assert!(
+            !terminal.engine.recent_output().contains("alpha-secret"),
+            "a cursor above the start cannot pull the start upwards"
+        );
+        // A switch observed inside the alternate screen applies once it closes.
+        let (terminal, _input) = switched();
+        terminal
+            .engine
+            .feed(b"\x1b[?1049h\x1b]0;admin@gamma: ~\x07\x1b[?1049lgamma-start\r\n");
+        let context = terminal.engine.recent_output();
+        assert!(context.contains("gamma-start") && !context.contains("beta-59"));
+        // Reconnecting a pane that showed a jump target lands on the gateway.
+        let (terminal, _input) = Terminal::channel(&Preferences::default(), "gw".into());
+        terminal
+            .engine
+            .set_environment(crate::session_environment::Environment::unknown_ssh());
+        terminal.engine.set_remote_identity("ops", "bastion");
+        terminal
+            .engine
+            .feed(b"\x1b]0;admin@web01: ~\x07web01-secret\r\n");
+        terminal.engine.pause();
+        terminal
+            .engine
+            .set_environment(crate::session_environment::Environment::unknown_ssh());
+        terminal.engine.set_remote_identity("ops", "bastion");
+        terminal.engine.resume();
+        terminal.engine.feed(b"bastion-new\r\n");
+        let context = terminal.engine.recent_output();
+        assert!(context.contains("bastion-new"));
+        assert!(!context.contains("web01-secret"), "{context}");
+        Ok(())
+    }
+
+    #[test]
+    fn prompt_probe_on_a_new_jump_target_starts_a_new_context() {
+        let (terminal, input) = Terminal::channel(&Preferences::default(), "gateway".into());
+        terminal
+            .engine
+            .set_environment(crate::session_environment::Environment::unknown_ssh());
+        terminal.engine.set_remote_identity("ops", "bastion");
+        terminal
+            .engine
+            .feed(b"bastion-menu-secret\r\nOpt> web01\r\nLast login: today\r\nadmin@web01 ~ % ");
+        terminal.engine.request_directory_tracking();
+        assert!(matches!(input.try_recv(), Ok(Command::Input(_))));
+        let context = terminal.engine.recent_output();
+        assert!(context.starts_with("admin@web01 ~ %"), "{context}");
+        assert!(!context.contains("bastion-menu-secret"));
+    }
+
+    /// A pane that showed `admin@alpha`, then switched to `admin@beta` at `BETASTART`.
+    fn alpha_then_beta(
+        preferences: &Preferences,
+        size: TermSize,
+        alpha: &[usize],
+    ) -> Result<(Terminal, Receiver<Command>)> {
+        let (terminal, input) = Terminal::channel(preferences, "gw".into());
+        terminal.engine.resize(size)?;
+        terminal.engine.feed(b"\x1b]0;admin@alpha: ~\x07");
+        for (index, length) in alpha.iter().enumerate() {
+            let line = format!("ALPHA{index}{}\r\n", "x".repeat(*length));
+            terminal.engine.feed(line.as_bytes());
+        }
+        terminal
+            .engine
+            .feed(b"ALPHA-tail\r\n\x1b]0;admin@beta: ~\x07BETASTART\r\n");
+        Ok((terminal, input))
+    }
+
+    #[test]
+    fn local_pane_output_is_excluded_once_the_pane_identifies_another_machine() {
+        let local = |title: &str| {
+            let (terminal, input) = Terminal::channel(&Preferences::default(), "zsh".into());
+            terminal
+                .engine
+                .set_environment(crate::session_environment::Environment::local(
+                    std::path::Path::new("/bin/zsh"),
+                ));
+            terminal.engine.feed(
+                b"me@mac ~ % cat secrets.txt\r\nLOCAL-SECRET\r\nme@mac ~ % ssh admin@web01\r\n",
+            );
+            terminal
+                .engine
+                .feed(format!("\x1b]0;{title}\x07{title}$ ").as_bytes());
+            (terminal, input)
+        };
+        let host = local_host_label()
+            .cloned()
+            .unwrap_or_else(|| "localhost".into());
+        for own in [
+            format!("me@{host}: ~"),
+            format!("root@{}.local: /etc", host.to_uppercase()),
+            "me@localhost: ~".into(),
+        ] {
+            let (terminal, _input) = local(&own);
+            let context = terminal.engine.recent_output();
+            assert!(context.contains("LOCAL-SECRET"), "{own}: {context}");
+        }
+        let (terminal, _input) = local("admin@nutty-remote-fixture: ~");
+        let context = terminal.engine.recent_output();
+        assert!(!context.contains("LOCAL-SECRET"), "{context}");
+        assert!(
+            context.starts_with("admin@nutty-remote-fixture: ~$"),
+            "{context}"
+        );
+        // Back on the local shell, whose hooks report its full hostname, and out again.
+        terminal.engine.feed(
+            format!("exit\r\n\x1b]7;file://{host}.local/Users/me\x07me@mac ~ % cat notes\r\nLOCAL-AGAIN\r\n")
+                .as_bytes(),
+        );
+        let context = terminal.engine.recent_output();
+        assert!(context.starts_with("me@mac ~ % cat notes"), "{context}");
+        terminal
+            .engine
+            .input(b"ssh admin@nutty-remote-fixture\r".to_vec())
+            .expect("submit ssh");
+        terminal
+            .engine
+            .feed(b"\x1b]0;admin@nutty-remote-fixture: ~\x07remote-again\r\n");
+        assert_eq!(terminal.engine.recent_output(), "remote-again");
+    }
+
+    #[test]
+    fn a_local_shell_whose_title_names_another_host_keeps_one_session() {
+        let (terminal, _input) = Terminal::channel(
+            &Preferences {
+                track_directory: true,
+                ..Default::default()
+            },
+            "zsh".into(),
+        );
+        terminal
+            .engine
+            .set_environment(crate::session_environment::Environment::local(
+                std::path::Path::new("/bin/zsh"),
+            ));
+        let host = local_host_label()
+            .cloned()
+            .unwrap_or_else(|| "localhost".into());
+        let mut ids = std::collections::HashSet::new();
+        for n in 0..4 {
+            terminal.engine.feed(
+                format!(
+                    "\x1b]133;D;0\x07\x1b]7;file://{host}.local/Users/me\x07\x1b]133;A\x07\
+                     \x1b]0;me@devbox: ~\x07me@devbox:~$ \x1b]133;B\x07ls\r\n\
+                     \x1b]133;C\x07OUT{n}\r\n"
+                )
+                .as_bytes(),
+            );
+            ids.extend(terminal.engine.directory_target().map(|target| target.id));
+        }
+        assert!(ids.len() <= 2, "the target changed {} times", ids.len());
+        let context = terminal.engine.recent_output();
+        assert!(
+            context.contains("OUT1") && context.contains("OUT3"),
+            "{context}"
+        );
+    }
+
+    #[test]
+    fn a_host_whose_title_and_osc7_names_differ_keeps_one_session() {
+        let (terminal, _input) = Terminal::channel(
+            &Preferences {
+                track_directory: true,
+                ..Default::default()
+            },
+            "gw".into(),
+        );
+        let mut ids = std::collections::HashSet::new();
+        for n in 0..4 {
+            terminal.engine.feed(
+                format!(
+                    "\x1b]133;D;0\x07\x1b]7;file://db-01.internal/home/admin\x07\x1b]133;A\x07\
+                     \x1b]0;admin@prod-db: ~\x07admin@prod-db:~$ ls\r\nOUT{n}\r\n"
+                )
+                .as_bytes(),
+            );
+            ids.extend(terminal.engine.directory_target().map(|target| target.id));
+        }
+        assert_eq!(ids.len(), 2, "named by the title, then once by OSC 7");
+        let context = terminal.engine.recent_output();
+        assert!(
+            context.contains("OUT1") && context.contains("OUT3"),
+            "{context}"
+        );
+    }
+
+    #[test]
+    fn manual_reconnect_leaves_the_previous_connections_alternate_screen() {
+        let bound = || {
+            let mut environment = crate::session_environment::Environment::unknown_ssh();
+            environment.startup_shell = Some("/bin/bash".into());
+            environment
+        };
+        let (old, _old_input) = Terminal::channel(&Preferences::default(), "gw".into());
+        old.engine.set_environment(bound());
+        old.engine.set_remote_identity("ops", "bastion");
+        old.engine
+            .feed(b"\x1b]0;admin@web01: ~\x07web01-secret\r\n\x1b[?1049hweb01-top-screen");
+        old.engine.finish();
+        let (new, _new_input) = Terminal::channel(&Preferences::default(), "gw".into());
+        new.engine.set_environment(bound());
+        new.engine.set_remote_identity("ops", "bastion");
+        new.engine.inherit_screen(&old.engine);
+        new.engine.feed(b"bastion-new\r\n");
+        assert!(!new.engine.snapshot().mode.contains(TermMode::ALT_SCREEN));
+        let context = new.engine.recent_output();
+        assert!(context.contains("bastion-new"), "{context}");
+        assert!(!context.contains("web01"), "{context}");
+    }
+
+    #[test]
+    fn line_insertion_and_deletion_outside_the_scroll_region_keep_the_session_start() -> Result<()>
+    {
+        for sequence in [
+            "\x1b[10;20r\x1b[H\x1b[5M\x1b[r",
+            "\x1b[10;20r\x1b[4;1H\x1b[8M\x1b[r",
+            "\x1b[10;20r\x1b[H\x1b[3L\x1b[r",
+        ] {
+            let (terminal, _input) =
+                alpha_then_beta(&Preferences::default(), TermSize::default(), &[0; 5])?;
+            terminal.engine.feed(b"beta-1\r\nbeta-2\r\n");
+            terminal.engine.feed(sequence.as_bytes());
+            let context = terminal.engine.recent_output();
+            assert!(
+                context.starts_with("BETASTART\nbeta-1"),
+                "{sequence:?}: {context}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn images_outside_the_scroll_region_ignore_line_deletion_above_it() -> Result<()> {
+        let (terminal, _) = Terminal::channel(&Preferences::default(), "images".into());
+        terminal.engine.feed(
+            b"\x1b[5;1H\x1b_Ga=T,i=31,f=32,s=1,v=1,c=1,r=1,C=1;AQIDBA==\x1b\\\x1b[10;20r\x1b[2;1H\x1b[2M\x1b[r",
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while terminal.engine.snapshot().images.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let rows: Vec<_> = terminal
+            .engine
+            .snapshot()
+            .images
+            .iter()
+            .map(|image| image.row)
+            .collect();
+        assert_eq!(rows, [4.]);
+        Ok(())
+    }
+
+    #[test]
+    fn shrinking_below_a_cursor_above_the_session_start_fails_closed() -> Result<()> {
+        let preferences = Preferences {
+            scrollback: 30,
+            ..Default::default()
+        };
+        let size = TermSize {
+            columns: 24,
+            rows: 30,
+        };
+        let (terminal, _input) = alpha_then_beta(&preferences, size, &[31, 140, 8])?;
+        terminal.engine.feed(b"beta-old\r\n\x1b[11;1H");
+        terminal.engine.resize(TermSize {
+            columns: 112,
+            rows: 3,
+        })?;
+        assert_eq!(terminal.engine.recent_output(), "");
+        // The rows kept at the bottom predate the session; output that follows belongs to it,
+        // also across later resizes.
+        terminal.engine.feed(b"overwrite\r\nbeta-new\r\n");
+        terminal.engine.resize(TermSize::default())?;
+        terminal.engine.feed(b"\x1b[?1049h\x1b[?1049l");
+        assert_eq!(terminal.engine.recent_output(), "beta-new");
+        Ok(())
+    }
+
+    #[test]
+    fn reflow_joining_the_cursor_line_cannot_raise_the_session_start() -> Result<()> {
+        // The cursor row's wrap flag goes stale when the rows below it are dropped, and a
+        // later narrowing joins its line with the next.
+        let preferences = Preferences {
+            scrollback: 30,
+            ..Default::default()
+        };
+        let size = TermSize {
+            columns: 47,
+            rows: 16,
+        };
+        let (terminal, _input) = alpha_then_beta(&preferences, size, &[127])?;
+        terminal
+            .engine
+            .feed(format!("b{}\r\nb{}\r\n\x1b[10;1H", "z".repeat(156), "z".repeat(84)).as_bytes());
+        terminal.engine.resize(TermSize {
+            columns: 69,
+            rows: 10,
+        })?;
+        terminal
+            .engine
+            .feed(format!("b{}\r\n\x1b[?1049h", "z".repeat(45)).as_bytes());
+        terminal.engine.resize(TermSize {
+            columns: 46,
+            rows: 8,
+        })?;
+        terminal.engine.feed(b"\x1b[?1049l");
+        let context = terminal.engine.recent_output();
+        assert!(context.starts_with("BETASTART\n"), "{context}");
+        Ok(())
+    }
+
+    #[test]
+    fn reflow_joining_a_line_shortened_by_character_deletion_cannot_raise_the_session_start()
+    -> Result<()> {
+        // Deleting characters moves the wrap flag off the last column; a narrower width then
+        // continues that line into the next one, where gamma's session starts.
+        let size = TermSize {
+            columns: 20,
+            rows: 10,
+        };
+        let (terminal, _input) = alpha_then_beta(&Preferences::default(), size, &[])?;
+        terminal.engine.feed(
+            format!(
+                "\x1b[3;1H\x1b[J{}\x1b[A\x1b[2P\x1b[B\r\x1b[K",
+                "a".repeat(25)
+            )
+            .as_bytes(),
+        );
+        terminal
+            .engine
+            .feed(b"\x1b]0;admin@gamma: ~\x07GAMMASTART\r\n");
+        terminal.engine.resize(TermSize {
+            columns: 15,
+            rows: 10,
+        })?;
+        let context = terminal.engine.recent_output();
+        assert!(
+            !context.contains('a') && !context.contains("BETA"),
+            "{context}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reflow_splitting_the_cursor_line_cannot_raise_a_start_below_it() -> Result<()> {
+        let narrow = TermSize {
+            columns: 16,
+            rows: 20,
+        };
+        let wide = TermSize {
+            columns: 61,
+            rows: 20,
+        };
+        let (terminal, _input) = alpha_then_beta(&Preferences::default(), narrow, &[96])?;
+        terminal.engine.feed(b"\x1b[2;1H");
+        terminal.engine.resize(wide)?;
+        // Behind the alternate screen alacritty splits the line holding the cursor.
+        terminal.engine.feed(b"\x1b[?1049h");
+        terminal.engine.resize(narrow)?;
+        terminal.engine.resize(wide)?;
+        terminal.engine.feed(b"\x1b[?1049l");
+        let context = terminal.engine.recent_output();
+        assert!(!context.contains("ALPHA"), "{context}");
+        Ok(())
+    }
+
+    #[test]
+    fn escapes_that_end_a_control_string_still_track_the_session_start() -> Result<()> {
+        for sequence in [&b"\x1b]0;x\x1b[3T\x07"[..], b"\x1bPzz\x1b[3T\x1b\\"] {
+            let (terminal, _input) =
+                alpha_then_beta(&Preferences::default(), TermSize::default(), &[0; 5])?;
+            terminal.engine.feed(b"beta-1\r\n");
+            terminal.engine.feed(sequence);
+            let context = terminal.engine.recent_output();
+            assert!(!context.contains("ALPHA"), "{sequence:?}: {context}");
+            assert!(context.contains("BETASTART"), "{sequence:?}: {context}");
+        }
+        Ok(())
+    }
+
+    /// Random output, cursor jumps, clears, scroll regions, character deletion, wide text and
+    /// resizes, also behind the alternate screen. The start may be lost (failing closed), but
+    /// alpha's output must never reach the context.
+    #[test]
+    fn session_start_never_moves_above_the_switch_under_random_screen_operations() -> Result<()> {
+        let mut seed: u64 = 0x1234_5678;
+        let mut random = move |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        fn size(random: &mut impl FnMut(u64) -> u64, columns: u64, rows: u64) -> TermSize {
+            TermSize {
+                columns: 10 + random(columns) as u16,
+                rows: 3 + random(rows) as u16,
+            }
+        }
+        for case in 0..400 {
+            let preferences = Preferences {
+                scrollback: if case % 3 == 0 { 30 } else { 10_000 },
+                ..Default::default()
+            };
+            let start = size(&mut random, 90, 30);
+            let alpha: Vec<_> = (0..random(40)).map(|_| random(150) as usize).collect();
+            let (terminal, _input) = alpha_then_beta(&preferences, start, &alpha)?;
+            let mut operations = Vec::new();
+            for _ in 0..10 {
+                let operation = match random(12) {
+                    0 | 1 => {
+                        let size = size(&mut random, 150, 60);
+                        terminal.engine.resize(size)?;
+                        format!("resize {}x{}", size.columns, size.rows)
+                    }
+                    2 => format!("b{}\r\n", "z".repeat(random(200) as usize)),
+                    3 => {
+                        terminal.engine.feed(b"\x1b[?1049hfull-screen");
+                        for _ in 0..=random(2) {
+                            terminal.engine.resize(size(&mut random, 150, 60))?;
+                        }
+                        "\x1b[?1049l".into()
+                    }
+                    4 => format!("\x1b[{};1H", random(20) + 1),
+                    5 => "\x1b[2J".into(),
+                    6 => format!("\x1b[{}G\x1b[{}P", random(40) + 1, random(10) + 1),
+                    7 => format!("w{}\r\n", "漢".repeat(random(80) as usize)),
+                    8 => {
+                        let top = random(10) + 1;
+                        let bottom = top + random(15) + 1;
+                        let line = top + random(4);
+                        let count = random(4) + 1;
+                        let kind = if random(2) == 0 { 'M' } else { 'L' };
+                        format!("\x1b[{top};{bottom}r\x1b[{line};1H\x1b[{count}{kind}\x1b[r")
+                    }
+                    9 => format!(
+                        "\x1b[{}A{}",
+                        random(4) + 1,
+                        "q".repeat(random(120) as usize)
+                    ),
+                    10 => {
+                        let count = random(5) + 1;
+                        let kind = if random(2) == 0 { 'S' } else { 'T' };
+                        format!("\x1b[{count}{kind}")
+                    }
+                    _ => "\x1b[H\x1bM".into(),
+                };
+                if !operation.starts_with("resize") {
+                    terminal.engine.feed(operation.as_bytes());
+                }
+                operations.push(operation);
+            }
+            let context = terminal.engine.recent_output();
+            assert!(
+                !context.contains("ALPHA"),
+                "case {case}: {operations:?}\n{context}"
+            );
+        }
         Ok(())
     }
 

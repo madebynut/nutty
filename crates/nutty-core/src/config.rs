@@ -489,8 +489,7 @@ impl Store {
     }
 
     pub fn save(&self) -> Result<()> {
-        self.profile.validate()?;
-        let bytes = serde_json::to_vec_pretty(&self.profile)?;
+        let bytes = self.profile.stored_bytes()?;
         let temporary = self
             .directory
             .join(format!(".profile-{}.tmp", Uuid::new_v4()));
@@ -541,6 +540,17 @@ impl Store {
 }
 
 impl Profile {
+    /// The validated `profile.json` contents. A profile the loader would refuse for its
+    /// size is never written, so saving cannot make the next start fail.
+    fn stored_bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let bytes = serde_json::to_vec_pretty(self)?;
+        ensure!(
+            bytes.len() as u64 <= MAX_PROFILE_BYTES,
+            "配置超过 2 MiB，未保存；请删除部分连接或其他条目"
+        );
+        Ok(bytes)
+    }
     /// Gives a profile without connection roles the roles its jump routes imply.
     pub fn assign_connection_roles(&mut self) {
         if !self.connection_roles {
@@ -1078,7 +1088,8 @@ fn save_transaction_changes(
     removals: &[String],
     credentials: &mut impl Credentials,
 ) -> Result<()> {
-    store.profile.validate()?;
+    // Checked before any credential changes, which would otherwise need rolling back.
+    store.profile.stored_bytes()?;
     let mut names = std::collections::HashSet::new();
     ensure!(
         updates
@@ -1825,6 +1836,78 @@ mod recovery_tests {
                 serde_json::from_value(serde_json::to_value(&options)?)?;
             assert_eq!(restored.clipboard_write, policy);
         }
+        Ok(())
+    }
+    #[test]
+    fn profiles_the_loader_would_refuse_are_never_written() -> Result<()> {
+        struct Untouched(usize);
+        impl Credentials for Untouched {
+            fn read(&mut self, _: &str) -> Result<Option<Zeroizing<String>>> {
+                self.0 += 1;
+                Ok(None)
+            }
+            fn write(&mut self, _: &str, _: &str) -> Result<()> {
+                self.0 += 1;
+                Ok(())
+            }
+            fn remove(&mut self, _: &str) -> Result<()> {
+                self.0 += 1;
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let mut store = Store::open(directory.path().to_path_buf())?;
+        store.save()?;
+        let original = fs::read(directory.path().join("profile.json"))?;
+        for index in 0..4096 {
+            store.profile.connections.push(Connection {
+                kind: ConnectionKind::Ssh,
+                role: ConnectionRole::Host,
+                initial_directory: ".".into(),
+                id: Uuid::new_v4(),
+                name: format!("server-{index}"),
+                group: "prod".into(),
+                host: format!("server-{index}.example.com"),
+                port: 22,
+                user: "deploy".into(),
+                auth: Authentication::Agent,
+                jump: None,
+                ssh: SshOptions::default(),
+                proxy: None,
+            });
+        }
+        store.profile.validate()?;
+        let error = store.save().expect_err("oversized profile");
+        assert!(format!("{error:#}").contains("2 MiB"), "{error:#}");
+        assert_eq!(fs::read(directory.path().join("profile.json"))?, original);
+        assert!(!directory.path().join("profile.previous.json").exists());
+        let mut credentials = Untouched(0);
+        let secret = Zeroizing::new("secret".to_string());
+        assert!(
+            save_transaction_changes(
+                &store,
+                &[("account".into(), secret)],
+                &["removed".into()],
+                &mut credentials
+            )
+            .is_err()
+        );
+        assert_eq!(credentials.0, 0, "credentials are not touched");
+        assert!(
+            Store::open(directory.path().to_path_buf())?
+                .profile
+                .connections
+                .is_empty()
+        );
+        store.profile.connections.truncate(1024);
+        store.save()?;
+        assert_eq!(
+            Store::open(directory.path().to_path_buf())?
+                .profile
+                .connections
+                .len(),
+            1024
+        );
         Ok(())
     }
 }

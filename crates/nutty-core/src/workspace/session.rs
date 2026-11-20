@@ -163,11 +163,30 @@ fn read(path: &Path) -> Result<Snapshot> {
     Ok(snapshot)
 }
 
+/// Whether a checkpoint is not damaged but unreadable here: an I/O error other than
+/// absence, or a version newer than this application supports. Such a file is neither
+/// replaced nor set aside, as with `profile.json`.
+fn kept_as_is(path: &Path, error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() != std::io::ErrorKind::NotFound)
+        || fs::metadata(path).is_ok_and(|metadata| metadata.len() <= MAX_BYTES)
+            && fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value.get("version")?.as_u64())
+                .is_some_and(|version| version > 1)
+}
+
 /// A damaged latest checkpoint falls back to the last validated snapshot with a visible notice.
+/// An unreadable or newer checkpoint is an error and stays in place.
 pub fn load(directory: &Path) -> Result<(Option<Snapshot>, Option<String>)> {
     let path = directory.join("workspace.json");
     match read(&path) {
         Ok(snapshot) => Ok((Some(snapshot), None)),
+        Err(error) if kept_as_is(&path, &error) => {
+            Err(error).context("无法读取工作区记录，或记录来自更高版本；已保留原记录")
+        }
         Err(error) => {
             let previous = directory.join("workspace.previous.json");
             if !path.exists()
@@ -218,11 +237,21 @@ fn save(directory: &Path, snapshot: &Snapshot) -> Result<()> {
     let bytes = serde_json::to_vec(snapshot)?;
     ensure!(bytes.len() as u64 <= MAX_BYTES, "工作区记录过大");
     let target = directory.join("workspace.json");
-    if let Ok(previous) = read(&target) {
-        atomic_write(
+    match read(&target) {
+        Ok(previous) => atomic_write(
             &directory.join("workspace.previous.json"),
             &serde_json::to_vec(&previous)?,
-        )?;
+        )?,
+        // `load` already told the user. Failing here would repeat that on every layout
+        // change and make quitting impossible, so this session's layout is not kept.
+        Err(error) if kept_as_is(&target, &error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "kept an unreadable or newer workspace.json; layout not saved"
+            );
+            return Ok(());
+        }
+        Err(_) => {}
     }
     atomic_write(&target, &bytes)
 }
@@ -421,5 +450,47 @@ mod tests {
             retained,
             vec![b"invalid-latest".to_vec(), b"invalid-previous".to_vec()]
         );
+    }
+    #[test]
+    fn newer_or_unreadable_checkpoints_are_neither_replaced_nor_set_aside() {
+        let corrupt = |directory: &Path| {
+            fs::read_dir(directory).expect("records").any(|entry| {
+                entry.is_ok_and(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("workspace-corrupt-")
+                })
+            })
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("workspace.json");
+        let previous = sample();
+        fs::write(
+            temp.path().join("workspace.previous.json"),
+            serde_json::to_vec(&previous).expect("previous"),
+        )
+        .expect("fixture");
+        let mut value = serde_json::to_value(sample()).expect("newer");
+        value["version"] = 2.into();
+        value["added_by_newer_version"] = true.into();
+        let newer = serde_json::to_vec(&value).expect("newer");
+        fs::write(&path, &newer).expect("fixture");
+        assert!(
+            load(temp.path()).is_err(),
+            "a newer layout is not downgraded"
+        );
+        assert!(
+            save(temp.path(), &previous).is_ok(),
+            "saving must not fail, or quitting would be blocked"
+        );
+        assert_eq!(fs::read(&path).expect("kept"), newer);
+        assert!(!corrupt(temp.path()));
+
+        fs::remove_file(&path).expect("fixture");
+        fs::create_dir(&path).expect("unreadable fixture");
+        assert!(load(temp.path()).is_err(), "I/O errors are not damage");
+        assert!(path.is_dir());
+        assert!(!corrupt(temp.path()));
     }
 }

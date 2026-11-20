@@ -34,6 +34,8 @@ impl Drop for Archive {
 pub struct Preview {
     pub archive: Archive,
     pub warnings: Vec<String>,
+    /// Archive credentials that equalled the local ones when the preview was read.
+    pub unchanged_secrets: HashSet<String>,
 }
 
 fn key(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
@@ -167,7 +169,9 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     result
 }
-pub fn load(path: &Path, password: Option<&str>) -> Result<Preview> {
+/// Reads an import for preview. `current` is the local profile, against which enabled
+/// integrations and their stored credentials are compared; this reads the keychain.
+pub fn load(path: &Path, password: Option<&str>, current: &Profile) -> Result<Preview> {
     let file = std::fs::File::open(path)?;
     ensure!(
         file.metadata()?.len() <= (MAX_ARCHIVE + HEADER + 16) as u64,
@@ -178,9 +182,12 @@ pub fn load(path: &Path, password: Option<&str>) -> Result<Preview> {
         .read_to_end(&mut bytes)?;
     if bytes.starts_with(MAGIC) {
         let archive = decrypt(&bytes, password.context("请输入备份密码")?)?;
+        let unchanged_secrets =
+            unchanged_integration_secrets(current, &archive, crate::config::optional_secret);
         Ok(Preview {
-            warnings: activation_notices(&archive.profile),
+            warnings: activation_notices(current, &archive, &unchanged_secrets),
             archive,
+            unchanged_secrets,
         })
     } else {
         let (connections, warnings) = openssh(
@@ -197,26 +204,79 @@ pub fn load(path: &Path, password: Option<&str>) -> Result<Preview> {
                 secrets: BTreeMap::new(),
             },
             warnings,
+            unchanged_secrets: HashSet::new(),
         })
     }
+}
+
+fn integration_secret(id: Uuid) -> String {
+    format!("integration-{id}")
+}
+fn trusted_server(current: &Profile, item: &crate::integration_config::McpServer) -> bool {
+    current.mcp_servers.contains(item)
+}
+fn trusted_agent(current: &Profile, item: &crate::integration_config::Agent) -> bool {
+    current.agents.iter().any(|old| {
+        old.id == item.id && old.enabled && old.name == item.name && old.process == item.process
+    })
+}
+/// Whether importing leaves an integration's stored credential (its environment or
+/// bearer token) as it is locally.
+fn secret_unchanged(incoming: &Archive, unchanged_secrets: &HashSet<String>, id: Uuid) -> bool {
+    let name = integration_secret(id);
+    !incoming.secrets.contains_key(&name) || unchanged_secrets.contains(&name)
+}
+
+/// Names of archive credentials for locally trusted, enabled integrations that equal
+/// the stored ones. Unreadable local credentials count as changed.
+fn unchanged_integration_secrets(
+    current: &Profile,
+    incoming: &Archive,
+    mut local: impl FnMut(&str) -> Result<Option<Zeroizing<String>>>,
+) -> HashSet<String> {
+    let servers = incoming
+        .profile
+        .mcp_servers
+        .iter()
+        .filter(|item| item.enabled && trusted_server(current, item))
+        .map(|item| item.id);
+    let agents = incoming
+        .profile
+        .agents
+        .iter()
+        .filter(|item| item.enabled && trusted_agent(current, item))
+        .map(|item| item.id);
+    servers
+        .chain(agents)
+        .map(integration_secret)
+        .filter(|name| {
+            incoming.secrets.get(name).is_some_and(|value| {
+                local(name).is_ok_and(|stored| stored.is_some_and(|stored| *stored == *value))
+            })
+        })
+        .collect()
 }
 
 /// Replaces the profile with an imported one without letting the file start programs.
 ///
 /// MCP servers and agents stay enabled, and forwards keep connecting automatically,
-/// only when an identical enabled record already exists locally. The local shell is
-/// kept because the imported path names a program on another machine.
-pub fn replace(current: &Profile, incoming: &Archive) -> Result<Archive> {
+/// only when an identical enabled record already exists locally. An integration also
+/// needs its archived credential, which can hold its environment, to be absent or listed
+/// in `unchanged_secrets`. The local shell is kept because the imported path names a
+/// program on another machine.
+pub fn replace(
+    current: &Profile,
+    incoming: &Archive,
+    unchanged_secrets: &HashSet<String>,
+) -> Result<Archive> {
     let mut profile = incoming.profile.clone();
     for item in &mut profile.mcp_servers {
-        let trusted = current.mcp_servers.contains(item);
-        item.enabled &= trusted;
+        item.enabled &=
+            trusted_server(current, item) && secret_unchanged(incoming, unchanged_secrets, item.id);
     }
     for item in &mut profile.agents {
-        let trusted = current.agents.iter().any(|old| {
-            old.id == item.id && old.enabled && old.name == item.name && old.process == item.process
-        });
-        item.enabled &= trusted;
+        item.enabled &=
+            trusted_agent(current, item) && secret_unchanged(incoming, unchanged_secrets, item.id);
     }
     for rule in &mut profile.forwards {
         let trusted = current.forwards.contains(rule);
@@ -230,21 +290,36 @@ pub fn replace(current: &Profile, incoming: &Archive) -> Result<Archive> {
     })
 }
 
-/// Lists what importing will deliberately not activate, for the preview.
-pub fn activation_notices(profile: &Profile) -> Vec<String> {
+/// Lists what importing will deliberately not activate, for the preview. Integrations
+/// identical to an enabled local one, with an unchanged credential, stay enabled.
+pub fn activation_notices(
+    current: &Profile,
+    incoming: &Archive,
+    unchanged_secrets: &HashSet<String>,
+) -> Vec<String> {
+    let profile = &incoming.profile;
+    let kept = |id| secret_unchanged(incoming, unchanged_secrets, id);
     let integrations = profile
         .mcp_servers
         .iter()
-        .filter(|item| item.enabled)
+        .filter(|item| item.enabled && !(trusted_server(current, item) && kept(item.id)))
         .count()
-        + profile.agents.iter().filter(|item| item.enabled).count();
+        + profile
+            .agents
+            .iter()
+            .filter(|item| item.enabled && !(trusted_agent(current, item) && kept(item.id)))
+            .count();
     let mut notices = Vec::new();
     if integrations > 0 {
         notices.push(format!(
             "{integrations} 个已启用的 MCP 服务或 Agent 不会随导入启用，请核对程序与参数后在设置中开启"
         ));
     }
-    if profile.forwards.iter().any(|rule| rule.on_connect) {
+    if profile
+        .forwards
+        .iter()
+        .any(|rule| rule.on_connect && !current.forwards.contains(rule))
+    {
         notices.push("导入的端口转发不会在连接时自动启动，请确认后重新开启".into());
     }
     notices
@@ -392,6 +467,10 @@ enum MatchCriterion {
     User(String),
     LocalUser(String),
 }
+
+/// Keepalive bounds accepted by `Connection::validate`.
+const MAX_KEEPALIVE_SECONDS: u64 = 3600;
+const MAX_KEEPALIVE_COUNT: usize = 20;
 
 struct ImportBudget {
     files: usize,
@@ -603,17 +682,33 @@ pub fn openssh(text: &str, directory: &Path) -> Result<(Vec<Connection>, Vec<Str
             .get("serveraliveinterval")
             .and_then(|items| items.first())
             && let Ok(value) = expand(interval)
-            && let Ok(seconds) = value.parse()
+            && let Ok(seconds) = value.parse::<u64>()
         {
-            connection.ssh.keepalive_seconds = seconds;
+            // 0 disables keepalives in OpenSSH and here; longer intervals use the longest allowed.
+            if seconds > MAX_KEEPALIVE_SECONDS {
+                warnings.push(format!(
+                    "{name} 的 ServerAliveInterval 超过 {MAX_KEEPALIVE_SECONDS} 秒，已使用 {MAX_KEEPALIVE_SECONDS}"
+                ));
+            }
+            connection.ssh.keepalive_seconds = seconds.min(MAX_KEEPALIVE_SECONDS);
         }
         if let Some(count) = values
             .get("serveralivecountmax")
             .and_then(|items| items.first())
             && let Ok(value) = expand(count)
-            && let Ok(max) = value.parse()
+            && let Ok(max) = value.parse::<usize>()
         {
-            connection.ssh.keepalive_max = max;
+            // OpenSSH treats 0 as never disconnecting; the most tolerant setting is closest.
+            if !(1..=MAX_KEEPALIVE_COUNT).contains(&max) {
+                warnings.push(format!(
+                    "{name} 的 ServerAliveCountMax 须介于 1 和 {MAX_KEEPALIVE_COUNT} 之间，已使用 {MAX_KEEPALIVE_COUNT}"
+                ));
+            }
+            connection.ssh.keepalive_max = if max == 0 {
+                MAX_KEEPALIVE_COUNT
+            } else {
+                max.min(MAX_KEEPALIVE_COUNT)
+            };
         }
         if let Some(jump) = values.get("proxyjump").and_then(|items| items.first()) {
             match expand(jump) {
@@ -936,26 +1031,29 @@ fn match_criteria(tokens: &[String]) -> Result<Vec<MatchCriterion>, String> {
     Ok(criteria)
 }
 
+/// Some pattern matches and no `!pattern` does, as OpenSSH evaluates pattern lists.
+fn patterns_match<'a>(patterns: impl Iterator<Item = &'a str> + Clone, value: &str) -> bool {
+    let includes = patterns
+        .clone()
+        .any(|pattern| !pattern.starts_with('!') && wildcard(pattern, value));
+    let excludes = patterns
+        .filter_map(|pattern| pattern.strip_prefix('!'))
+        .any(|pattern| wildcard(pattern, value));
+    includes && !excludes
+}
+
 fn selector_matches(selector: &SshSelector, name: &str, user: &str, local_user: &str) -> bool {
+    // Match criteria take comma-separated pattern lists such as `host a,b,!c`.
+    let list = |patterns: &str, value: &str| patterns_match(patterns.split(','), value);
     match selector {
-        SshSelector::Host(patterns) => {
-            let includes = patterns
-                .iter()
-                .any(|pattern| !pattern.starts_with('!') && wildcard(pattern, name));
-            let excludes = patterns.iter().any(|pattern| {
-                pattern
-                    .strip_prefix('!')
-                    .is_some_and(|pattern| wildcard(pattern, name))
-            });
-            includes && !excludes
-        }
+        SshSelector::Host(patterns) => patterns_match(patterns.iter().map(String::as_str), name),
         SshSelector::Match(criteria) => criteria.iter().all(|criterion| match criterion {
             MatchCriterion::All => true,
-            MatchCriterion::Host(pattern) | MatchCriterion::OriginalHost(pattern) => {
-                wildcard(pattern, name)
+            MatchCriterion::Host(patterns) | MatchCriterion::OriginalHost(patterns) => {
+                list(patterns, name)
             }
-            MatchCriterion::User(pattern) => wildcard(pattern, user),
-            MatchCriterion::LocalUser(pattern) => wildcard(pattern, local_user),
+            MatchCriterion::User(patterns) => list(patterns, user),
+            MatchCriterion::LocalUser(patterns) => list(patterns, local_user),
         }),
     }
 }
@@ -1268,6 +1366,33 @@ mod tests {
     }
 
     #[test]
+    fn ssh_import_bounds_keepalives_per_host_and_matches_pattern_lists() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (connections, warnings) = openssh(
+            "Host slow\n ServerAliveInterval 7200\nHost never\n ServerAliveCountMax 0\nHost many\n ServerAliveCountMax 50\nHost plain\n ServerAliveInterval 0\n ServerAliveCountMax 5\nHost a b c\nMatch host a,b,!b\n User listed\nMatch originalhost c,x\n User other\n",
+            directory.path(),
+        )?;
+        let find = |name: &str| connections.iter().find(|item| item.name == name);
+        let slow = find("slow").context("slow")?;
+        assert_eq!(slow.ssh.keepalive_seconds, 3600);
+        assert_eq!(find("never").context("never")?.ssh.keepalive_max, 20);
+        assert_eq!(find("many").context("many")?.ssh.keepalive_max, 20);
+        let plain = find("plain").context("plain")?;
+        assert_eq!(
+            (plain.ssh.keepalive_seconds, plain.ssh.keepalive_max),
+            (0, 5)
+        );
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert_eq!(find("a").context("a")?.user, "listed");
+        assert_ne!(
+            find("b").context("b")?.user,
+            "listed",
+            "a negated pattern excludes the host"
+        );
+        assert_eq!(find("c").context("c")?.user, "other");
+        Ok(())
+    }
+    #[test]
     fn ssh_import_preserves_first_values_jump_links_and_existing_merge_records() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let (connections, warnings) = openssh(
@@ -1478,7 +1603,9 @@ mod import_activation_tests {
             rule
         }]);
 
-        let replaced = replace(&current, &archive(incoming))?.profile.clone();
+        let replaced = replace(&current, &archive(incoming), &HashSet::new())?
+            .profile
+            .clone();
         assert_eq!(replaced.preferences.shell, current.preferences.shell);
         let server_enabled = |name: &str| {
             replaced
@@ -1520,14 +1647,102 @@ mod import_activation_tests {
         profile.mcp_servers.push(server("planted"));
         profile.agents.push(agent("planted agent"));
         profile.forwards.push(forward(ssh.id));
-        let notices = activation_notices(&profile);
+        let local = Profile::default();
+        let notices = activation_notices(&local, &archive(profile.clone()), &HashSet::new());
         assert_eq!(notices.len(), 2);
         assert!(notices[0].starts_with("2 "));
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("backup.nutty");
         write_new(&path, &encrypt(&archive(profile), "correct horse")?)?;
-        assert_eq!(load(&path, Some("correct horse"))?.warnings, notices);
-        assert!(activation_notices(&Profile::default()).is_empty());
+        assert_eq!(
+            load(&path, Some("correct horse"), &local)?.warnings,
+            notices
+        );
+        assert!(
+            activation_notices(&local, &archive(Profile::default()), &HashSet::new()).is_empty()
+        );
         Ok(())
+    }
+    #[test]
+    fn replacing_disables_trusted_integrations_whose_archived_credential_changed() -> Result<()> {
+        let trusted_server = server("trusted");
+        let trusted_agent = agent("trusted agent");
+        let mut current = Profile::default();
+        current.mcp_servers.push(trusted_server.clone());
+        current.agents.push(trusted_agent.clone());
+        let server_secret = integration_secret(trusted_server.id);
+        let agent_secret = integration_secret(trusted_agent.id);
+        let incoming = Archive {
+            profile: current.clone(),
+            secrets: BTreeMap::from([
+                (server_secret.clone(), "token".to_string()),
+                (
+                    agent_secret.clone(),
+                    r#"{"NODE_OPTIONS":"--require /tmp/evil.js"}"#.to_string(),
+                ),
+            ]),
+        };
+        let replaced = replace(&current, &incoming, &HashSet::new())?;
+        assert!(!replaced.profile.mcp_servers[0].enabled);
+        assert!(
+            !replaced.profile.agents[0].enabled,
+            "a planted environment is not trusted"
+        );
+        assert_eq!(replaced.secrets, incoming.secrets);
+        let notices = activation_notices(&current, &incoming, &HashSet::new());
+        assert!(notices[0].starts_with("2 "), "{notices:?}");
+        let unchanged = HashSet::from([server_secret.clone()]);
+        let replaced = replace(&current, &incoming, &unchanged)?;
+        assert!(replaced.profile.mcp_servers[0].enabled);
+        assert!(!replaced.profile.agents[0].enabled);
+        assert!(activation_notices(&current, &incoming, &unchanged)[0].starts_with("1 "));
+        let unchanged = HashSet::from([server_secret, agent_secret]);
+        assert!(replace(&current, &incoming, &unchanged)?.profile.agents[0].enabled);
+        assert!(activation_notices(&current, &incoming, &unchanged).is_empty());
+        Ok(())
+    }
+    #[test]
+    fn only_equal_local_credentials_of_trusted_integrations_count_as_unchanged() {
+        let same = agent("same");
+        let different = agent("different");
+        let missing = agent("missing");
+        let unreadable = agent("unreadable");
+        let untrusted = agent("untrusted");
+        let mut current = Profile::default();
+        current.agents.extend([
+            same.clone(),
+            different.clone(),
+            missing.clone(),
+            unreadable.clone(),
+        ]);
+        current.agents.push(Agent {
+            enabled: false,
+            ..untrusted.clone()
+        });
+        let incoming = Archive {
+            profile: current.clone(),
+            secrets: [&same, &different, &missing, &unreadable, &untrusted]
+                .into_iter()
+                .map(|item| (integration_secret(item.id), "{}".to_string()))
+                .collect(),
+        };
+        let mut read = Vec::new();
+        let unchanged = unchanged_integration_secrets(&current, &incoming, |name| {
+            read.push(name.to_string());
+            if name == integration_secret(same.id) {
+                Ok(Some(Zeroizing::new("{}".into())))
+            } else if name == integration_secret(different.id) {
+                Ok(Some(Zeroizing::new(r#"{"A":"B"}"#.into())))
+            } else if name == integration_secret(missing.id) {
+                Ok(None)
+            } else {
+                anyhow::bail!("keychain locked")
+            }
+        });
+        assert_eq!(unchanged, HashSet::from([integration_secret(same.id)]));
+        assert!(
+            !read.contains(&integration_secret(untrusted.id)),
+            "disabled local records are not compared"
+        );
     }
 }

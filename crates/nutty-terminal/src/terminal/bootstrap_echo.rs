@@ -14,6 +14,10 @@ use std::{
 
 const LIMIT: usize = 32 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(3);
+/// Screen cells all echo comparisons may read together. A genuine echo needs a small
+/// fraction; hostile floods of line breaks exhaust it and fail open instead of holding
+/// the terminal lock for seconds.
+const MATCH_BUDGET: usize = 4 * 1024 * 1024;
 
 pub(super) struct Echo {
     wire: String,
@@ -87,27 +91,45 @@ impl Echo {
             parser.advance(&mut screen, std::slice::from_ref(byte));
         }
         let mut spans = Vec::new();
+        let mut budget = MATCH_BUDGET;
         for (start, column) in candidates {
+            // Each input byte renders as at most two cells (wide or caret notation), so
+            // an echo starting here stays above `rows`; once the cursor reaches that row
+            // this start can no longer match.
+            let rows = (column + 2 * expected.len()) / self.columns.max(2) + 3;
             let mut screen = scratch_screen(self.columns, column, before.len() - start);
             let mut parser: Processor = Processor::new();
             let echoed = &before[start..];
             for (offset, byte) in echoed.iter().enumerate() {
-                // A shell can print the nonce before the line discipline echoes CR.
-                // The command is already complete, with the cursor still on its last row.
-                if *byte == b'\r' && echo_matches(&screen, column, expected) {
-                    let mut stop = start + offset + 1;
-                    if before.get(stop) == Some(&b'\n') {
-                        stop += 1;
-                    }
-                    spans.push((start, stop));
+                if screen.grid().cursor.point.line.0 >= rows as i32 {
                     break;
                 }
+                // A shell can print the nonce before the line discipline echoes CR.
+                // The command is already complete, with the cursor still on its last row.
+                if *byte == b'\r' {
+                    let Some(matched) = charged_match(&screen, column, expected, &mut budget)
+                    else {
+                        return self.bytes.clone();
+                    };
+                    if matched {
+                        let mut stop = start + offset + 1;
+                        if before.get(stop) == Some(&b'\n') {
+                            stop += 1;
+                        }
+                        spans.push((start, stop));
+                        break;
+                    }
+                }
                 parser.advance(&mut screen, std::slice::from_ref(byte));
-                if (*byte == b'\n' || offset + 1 == echoed.len())
-                    && echo_matches(&screen, column, expected)
-                {
-                    spans.push((start, start + offset + 1));
-                    break;
+                if *byte == b'\n' || offset + 1 == echoed.len() {
+                    let Some(matched) = charged_match(&screen, column, expected, &mut budget)
+                    else {
+                        return self.bytes.clone();
+                    };
+                    if matched {
+                        spans.push((start, start + offset + 1));
+                        break;
+                    }
                 }
             }
         }
@@ -171,6 +193,18 @@ fn echo_matches(screen: &EchoScreen, column: usize, expected: &str) -> bool {
         )
         .trim_end()
         == expected
+}
+
+/// [`echo_matches`] charged against `budget` by the cells it reads; `None` once spent.
+fn charged_match(
+    screen: &EchoScreen,
+    column: usize,
+    expected: &str,
+    budget: &mut usize,
+) -> Option<bool> {
+    let rows = screen.grid().cursor.point.line.0.max(0) as usize + 1;
+    *budget = budget.checked_sub(rows * screen.columns())?;
+    Some(echo_matches(screen, column, expected))
 }
 
 fn scratch_screen(columns: usize, column: usize, bytes: usize) -> EchoScreen {
@@ -360,5 +394,51 @@ mod tests {
         let text = screen.bounds_to_string(Point::default(), screen.grid().cursor.point);
         assert!(text.contains("background warning"));
         assert!(!text.contains("nutty-bootstrap"));
+    }
+
+    #[test]
+    fn hostile_line_break_floods_are_bounded_and_genuine_echoes_still_match() {
+        // The longest bootstrap allows the most rows, so the most work per comparison.
+        let source = crate::shell_integration::remote_command("dash").expect("dash");
+        let echo = Echo::new(&source, 80, 0);
+        let pending = || {
+            Some(Echo {
+                wire: echo.wire.clone(),
+                marker: echo.marker.clone(),
+                bytes: Vec::new(),
+                columns: 80,
+                column: 0,
+                started: Instant::now(),
+            })
+        };
+        let flood = |unit: &[u8]| {
+            let mut input = b" printf ".repeat(16);
+            while input.len() + unit.len() + echo.marker.len() < LIMIT - 64 {
+                input.extend_from_slice(unit);
+            }
+            input.extend_from_slice(&echo.marker);
+            input
+        };
+        // Previously ~11 s in a release build for the line feed flood.
+        for unit in [&b"\n"[..], b"\r", b"\x1b[27;79H\r", b"\x1b[26;79H\n"] {
+            let input = flood(unit);
+            let started = Instant::now();
+            let output = Echo::filter(&mut pending(), &input).into_owned();
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{unit:?}: {:?}",
+                started.elapsed()
+            );
+            assert_eq!(output, input, "{unit:?}: no echo, all output is kept");
+        }
+        // A long banner before the echo does not exhaust the work bound.
+        let mut input = b"motd line\r\n".repeat(2000);
+        input.extend_from_slice(echo.wire().replace('\r', "\r\n").as_bytes());
+        input.extend_from_slice(&echo.marker);
+        input.extend_from_slice(b"$ ");
+        let text = String::from_utf8(Echo::filter(&mut pending(), &input).into_owned())
+            .expect("UTF-8 fixture");
+        assert!(!text.contains("nutty-bootstrap") && text.ends_with("$ "));
+        assert_eq!(text.matches("motd line").count(), 2000);
     }
 }

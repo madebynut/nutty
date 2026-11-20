@@ -421,7 +421,6 @@ SSH 身份认证失败	SSH authentication failed
 代理或目标连接超时	Proxy or destination connection timed out
 代理拒绝 CONNECT 请求	Proxy rejected CONNECT request
 代理用户名无效	Invalid proxy username
-恢复远程端口转发失败	Failed to restore remote forwarding
 此远程端口已在转发	Remote port is already forwarded
 远程监听端口必须大于零	Remote listening port must be greater than zero
 提供方 ID 或名称重复	Duplicate provider ID or name
@@ -936,6 +935,7 @@ SFTP 连续返回空目录页	The SFTP server repeatedly returned empty director
 包含未支持的展开或脚本结构，请手动执行	Unsupported expansion or script syntax; run manually
 {} 可能等待终端输入，请指定文件或管道	{} may wait for terminal input; specify a file or pipe
 {} 的命令或参数尚未通过自动只读校验	{} or its arguments have not passed the automatic read-only check
+{} 不适用于 {}，已阻止自动发送	{} is not available on {}; automatic send blocked
 命令语言与当前终端 Shell 不匹配，已阻止发送	Command language does not match the current terminal shell; sending blocked
 当前 Shell 暂不支持只读自动发送	Read-only auto-send is not supported by the current shell
 当前 Shell 不支持 $0，请手动调整命令	The current shell does not support $0; adjust the command manually
@@ -1010,3 +1010,17 @@ OSC 52 写入，常见于远端 tmux、vim；读取剪贴板始终询问	OSC 52 
 还没有保存的跳板机	No saved jump hosts yet
 没有匹配的跳板机	No matching jump hosts
 新建跳板机	New jump host
+命令包含双向文本控制字符，显示内容可能与实际命令不同	Command contains bidirectional text controls; what is displayed may differ from the command that runs
+配置超过 2 MiB，未保存；请删除部分连接或其他条目	Configuration exceeds 2 MiB and was not saved. Remove some connections or other entries
+{} 的 ServerAliveInterval 超过 3600 秒，已使用 3600	{}: ServerAliveInterval exceeds 3600 seconds; using 3600
+{} 的 ServerAliveCountMax 须介于 1 和 20 之间，已使用 20	{}: ServerAliveCountMax must be between 1 and 20; using 20
+无法读取工作区记录，或记录来自更高版本；已保留原记录	Unable to read the workspace checkpoint, or it was written by a newer version; the original was kept
+主机身份确认超时	Host identity confirmation timed out
+无法在本机解析 SOCKS 目标主机；如需由代理解析，请改用“SOCKS5 · 远程 DNS”	Could not resolve the SOCKS destination host locally. To let the proxy resolve it, use “SOCKS5 · Remote DNS”
+目录已发布，但无法设置其权限，可重试核对结果	The directory was published but its permissions could not be set; retry to reconcile the outcome
+无法移除传输记录：{}	Could not remove transfer record: {}
+允许：{}	Allow: {}
+终端目标已变化：再次点击将发送到 {}	Terminal target changed: click again to send to {}
+终端目标已变化：再次点击将发送到当前终端	Terminal target changed: click again to send to the current terminal
+IPv6 目标需写成 [地址]:端口，例如 [fe80::1]:22	Write IPv6 targets as [address]:port, such as [fe80::1]:22
+转发已中断：连接断开、远程端口仍被占用或监听出错；可重新启动	Forwarding stopped: the connection dropped, the remote port is still in use, or the listener failed. Start it again to retry

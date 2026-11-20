@@ -30,12 +30,85 @@ use tokio_util::{
 };
 use uuid::Uuid;
 
+/// What choosing a permission option does, decided by its ACP kind rather than
+/// the Agent-supplied label. Only one-time choices are ever offered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermissionKind {
+    Allow,
+    Reject,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PermissionOption {
+    pub label: String,
+    pub kind: PermissionKind,
+}
+
 pub struct Permission {
     pub id: Uuid,
     pub detail: String,
-    pub options: Vec<String>,
+    pub options: Vec<PermissionOption>,
+    /// The chosen option index; `None` reports the request as cancelled.
     pub answer: oneshot::Sender<Option<usize>>,
+    /// Cancelled once the request is answered, expires or its prompt ends.
     pub cancel: CancellationToken,
+}
+
+impl Permission {
+    /// The answer that declines this request: its reject option when offered,
+    /// otherwise a cancelled outcome.
+    pub fn rejection(&self) -> Option<usize> {
+        self.options
+            .iter()
+            .position(|option| option.kind == PermissionKind::Reject)
+    }
+}
+
+/// A prompt ends after the Agent sends nothing for this long, unless a permission
+/// request is waiting for the user.
+const PROMPT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a permission request waits for the user before it is cancelled.
+const PERMISSION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Agent traffic for the inactivity timeout. The value counts permission
+/// requests waiting for the user; every change restarts the timer.
+#[derive(Clone)]
+struct Activity(Arc<watch::Sender<usize>>);
+
+struct PermissionWait(Activity);
+
+impl Drop for PermissionWait {
+    fn drop(&mut self) {
+        self.0
+            .0
+            .send_modify(|waiting| *waiting = waiting.saturating_sub(1));
+    }
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self(Arc::new(watch::channel(0).0))
+    }
+    fn touch(&self) {
+        self.0.send_modify(|_| {});
+    }
+    /// Pauses the inactivity timeout until the returned guard is dropped.
+    fn wait_for_user(&self) -> PermissionWait {
+        self.0.send_modify(|waiting| *waiting += 1);
+        PermissionWait(self.clone())
+    }
+    /// Completes once the Agent has been silent for `limit` with no permission
+    /// request pending.
+    async fn idle(&self, limit: Duration) {
+        let mut changes = self.0.subscribe();
+        loop {
+            match tokio::time::timeout(limit, changes.changed()).await {
+                Ok(_) => {}
+                Err(_) if *changes.borrow() == 0 => return,
+                Err(_) => {}
+            }
+        }
+    }
 }
 struct Prompt {
     text: String,
@@ -267,6 +340,9 @@ impl Peer {
         let output_cancel = stopping.clone();
         let permission_cancel = stopping.clone();
         let permission_prompt = text.clone();
+        let activity = Activity::new();
+        let notification_activity = activity.clone();
+        let permission_activity = activity.clone();
         tokio::spawn(async move {
             let outgoing = <FramedWrite<tokio::process::ChildStdin, LinesCodec> as SinkExt<
                 String,
@@ -278,6 +354,7 @@ impl Peer {
                 .map(|result| result.map_err(|error| std::io::Error::other(error.to_string())));
             let running=agent_client_protocol::Client.v1()
                 .on_receive_notification(async move |message:agent_client_protocol::UntypedMessage,_cx| {
+                    notification_activity.touch();
                     if message.method != "session/update" { return Ok(()); }
                     if !notification_session.lock().expect("ACP session lock poisoned").as_ref().is_some_and(|session| message.params.get("sessionId").and_then(serde_json::Value::as_str) == Some(session.0.as_ref())) { return Ok(()); }
                     let raw_update = &message.params["update"];
@@ -298,15 +375,20 @@ impl Peer {
                     }Ok(())
                 },agent_client_protocol::on_receive_notification!())
                 .on_receive_request(async move |request:RequestPermissionRequest,responder,_connection| {
+                    permission_activity.touch();
                     let options:Vec<_>=request.options.into_iter().filter(|option|matches!(option.kind,PermissionOptionKind::AllowOnce|PermissionOptionKind::RejectOnce)).take(16).collect();
                     let detail=serde_json::to_string_pretty(&request.tool_call).unwrap_or_default();
                     let (answer,receive)=oneshot::channel();
                     let active_cancel = permission_prompt.lock().expect("ACP output lock poisoned").as_ref().map(|active| active.cancel.clone());
                     let selected=if detail.len()<=64*1024&&!options.is_empty() && let Some(active_cancel) = active_cancel {
-                        let permission=Permission{id:Uuid::new_v4(),detail,options:options.iter().map(|option|option.name.clone()).collect(),answer,cancel:active_cancel.clone()};
-                        tokio::select!{()=permission_cancel.cancelled()=>None,()=active_cancel.cancelled()=>None,result=async {
+                        // The request's own token expires its card however it ends.
+                        let cancel = active_cancel.child_token();
+                        let _expire = cancel.clone().drop_guard();
+                        let _waiting = permission_activity.wait_for_user();
+                        let permission=Permission{id:Uuid::new_v4(),detail,options:options.iter().map(|option|PermissionOption{label:option.name.clone(),kind:if option.kind==PermissionOptionKind::AllowOnce{PermissionKind::Allow}else{PermissionKind::Reject}}).collect(),answer,cancel:cancel.clone()};
+                        tokio::select!{()=permission_cancel.cancelled()=>None,()=cancel.cancelled()=>None,result=async {
                             permissions.send(permission).await.ok()?;
-                            tokio::time::timeout(Duration::from_secs(120),receive).await.ok()?.ok()?
+                            tokio::time::timeout(PERMISSION_TIMEOUT,receive).await.ok()?.ok()?
                         }=>result}
                     } else { None };
                     let outcome=selected.and_then(|index|options.get(index)).map(|option|RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_id.clone()))).unwrap_or(RequestPermissionOutcome::Cancelled);
@@ -344,7 +426,8 @@ impl Peer {
                         let response=tokio::select! {
                             ()=stopping.cancelled()=>None,
                             ()=prompt.cancel.cancelled()=>None,
-                            result=tokio::time::timeout(Duration::from_secs(180),request)=>Some(result),
+                            ()=activity.idle(PROMPT_IDLE_TIMEOUT)=>Some(Err(())),
+                            result=request=>Some(Ok(result)),
                         };
                         let completed = text.lock().expect("ACP output lock poisoned").take();
                         let text = if let Some(completed) = completed {
@@ -751,6 +834,31 @@ mod tests {
         let _ = pid;
         Ok(())
     }
+    #[tokio::test(start_paused = true)]
+    async fn prompt_timeout_counts_agent_silence_and_pauses_for_permission_decisions() {
+        let activity = Activity::new();
+        let limit = Duration::from_secs(10);
+        let started = tokio::time::Instant::now();
+        let idle = tokio::spawn({
+            let activity = activity.clone();
+            async move { activity.idle(limit).await }
+        });
+        // Steady Agent updates keep a turn alive well past the old fixed limit.
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            activity.touch();
+        }
+        assert!(!idle.is_finished());
+        // A permission card may wait for the user longer than the idle limit.
+        let waiting = activity.wait_for_user();
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(!idle.is_finished());
+        drop(waiting);
+        let resumed = tokio::time::Instant::now();
+        assert!(idle.await.is_ok());
+        assert!(resumed.elapsed() >= limit && started.elapsed() >= Duration::from_secs(270));
+    }
+
     #[tokio::test]
     async fn acp_keeps_one_session_and_requires_each_permission() -> Result<()> {
         tokio::time::timeout(Duration::from_secs(6), async {
@@ -777,9 +885,17 @@ mod tests {
             let peer =
                 Peer::new(agent, permissions, cancel.clone(), CancellationToken::new()).await?;
             for (choice, expected) in [
-                (Some(0), "Investigating. Decision: allow"),
+                (
+                    Some(PermissionKind::Allow),
+                    "Investigating. Decision: allow",
+                ),
+                (
+                    Some(PermissionKind::Reject),
+                    "Investigating. Decision: reject",
+                ),
                 (None, "Investigating. Decision: cancelled"),
             ] {
+                let mut expired = None;
                 let (progress, updates) = async_channel::bounded(4);
                 let replying = async {
                     assert_eq!(
@@ -789,8 +905,31 @@ mod tests {
                     );
                     let permission: Permission = receive.recv().await?;
                     assert!(permission.detail.contains("pwd"));
-                    assert_eq!(permission.options, ["Allow once", "Reject once"]);
-                    let _ = permission.answer.send(choice);
+                    assert_eq!(
+                        permission.options,
+                        [
+                            PermissionOption {
+                                label: "Allow once".into(),
+                                kind: PermissionKind::Allow
+                            },
+                            PermissionOption {
+                                label: "Reject once".into(),
+                                kind: PermissionKind::Reject
+                            }
+                        ]
+                    );
+                    assert_eq!(permission.rejection(), Some(1));
+                    assert!(!permission.cancel.is_cancelled());
+                    expired = Some(permission.cancel.clone());
+                    let index = match choice {
+                        Some(PermissionKind::Reject) => permission.rejection(),
+                        Some(kind) => permission
+                            .options
+                            .iter()
+                            .position(|option| option.kind == kind),
+                        None => None,
+                    };
+                    let _ = permission.answer.send(index);
                     Ok::<_, anyhow::Error>(())
                 };
                 let (reply, result) = tokio::join!(
@@ -803,6 +942,10 @@ mod tests {
                 );
                 result?;
                 assert_eq!(reply?, expected);
+                assert!(
+                    expired.is_some_and(|cancel| cancel.is_cancelled()),
+                    "an answered request no longer shows its card"
+                );
             }
             let request_cancel = CancellationToken::new();
             let cancelling = async {

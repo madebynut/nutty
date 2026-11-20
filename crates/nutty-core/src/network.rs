@@ -100,6 +100,19 @@ impl Proxy {
         tokio::task::spawn_blocking(move || crate::config::secret(&name)).await?
     }
     pub async fn http_client(&self) -> Result<reqwest::Client> {
+        Ok(self
+            .client_builder()
+            .await?
+            .timeout(Duration::from_secs(90))
+            .build()?)
+    }
+    /// Like [`Self::http_client`] but without a total request limit, for streamed
+    /// replies that legitimately run for minutes. The caller must bound the request
+    /// itself (first-byte and idle timeouts).
+    pub async fn streaming_http_client(&self) -> Result<reqwest::Client> {
+        Ok(self.client_builder().await?.build()?)
+    }
+    async fn client_builder(&self) -> Result<reqwest::ClientBuilder> {
         self.validate()?;
         let mut proxy = reqwest::Proxy::all(&self.url)?;
         if !self.username.is_empty() {
@@ -108,9 +121,7 @@ impl Proxy {
         Ok(reqwest::Client::builder()
             .proxy(proxy)
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(90))
-            .build()?)
+            .connect_timeout(Duration::from_secs(15)))
     }
 }
 
@@ -133,10 +144,21 @@ pub fn cleartext_remote(url: &str) -> bool {
         }
 }
 
+/// An IP address written as a host, with or without IPv6 brackets.
+fn ip_literal(host: &str) -> Option<std::net::IpAddr> {
+    host.strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host)
+        .parse()
+        .ok()
+}
 pub async fn connect(host: &str, port: u16, proxy: Option<&Proxy>) -> Result<TcpStream> {
     tokio::time::timeout(Duration::from_secs(20), async {
         let Some(proxy) = proxy else {
-            return Ok(TcpStream::connect((host, port)).await?);
+            let socket = TcpStream::connect((host, port)).await?;
+            // Interactive SSH sends small packets; match the proxied path.
+            socket.set_nodelay(true)?;
+            return Ok(socket);
         };
         proxy.validate()?;
         let url = url::Url::parse(&proxy.url)?;
@@ -153,7 +175,7 @@ pub async fn connect(host: &str, port: u16, proxy: Option<&Proxy>) -> Result<Tcp
         };
         let password = proxy.password().await?;
         if url.scheme() == "http" {
-            let authority = if host.contains(':') {
+            let authority = if host.contains(':') && !host.starts_with('[') {
                 format!("[{host}]:{port}")
             } else {
                 format!("{host}:{port}")
@@ -217,8 +239,33 @@ pub async fn connect(host: &str, port: u16, proxy: Option<&Proxy>) -> Result<Tcp
                 !host.is_empty() && host.len() <= 255 && !host.contains(['\0', '\r', '\n']),
                 "SOCKS 目标无效"
             );
-            let mut request = vec![5, 1, 0, 3, host.len() as u8];
-            request.extend_from_slice(host.as_bytes());
+            // Only `socks5h` delegates name resolution to the proxy.
+            let address = match ip_literal(host) {
+                Some(address) => Some(address),
+                None if url.scheme() == "socks5" => Some(
+                    tokio::net::lookup_host((host, port))
+                        .await?
+                        .next()
+                        .context("无法在本机解析 SOCKS 目标主机；如需由代理解析，请改用“SOCKS5 · 远程 DNS”")?
+                        .ip(),
+                ),
+                None => None,
+            };
+            let mut request = vec![5, 1, 0];
+            match address {
+                Some(std::net::IpAddr::V4(address)) => {
+                    request.push(1);
+                    request.extend_from_slice(&address.octets());
+                }
+                Some(std::net::IpAddr::V6(address)) => {
+                    request.push(4);
+                    request.extend_from_slice(&address.octets());
+                }
+                None => {
+                    request.extend_from_slice(&[3, host.len() as u8]);
+                    request.extend_from_slice(host.as_bytes());
+                }
+            }
             request.extend_from_slice(&port.to_be_bytes());
             socket.write_all(&request).await?;
             ensure!(
@@ -336,6 +383,101 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod target_address_tests {
+    use super::*;
+    /// Accepts one SOCKS5 CONNECT and returns the address type and address bytes sent.
+    async fn socks_request(scheme: &str, host: &str) -> Result<(u8, Vec<u8>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let proxy = Proxy {
+            id: Uuid::new_v4(),
+            name: "fixture".into(),
+            url: format!("{scheme}://{}", listener.local_addr()?),
+            username: String::new(),
+        };
+        let serving = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut hello = [0; 3];
+            socket.read_exact(&mut hello).await?;
+            socket.write_all(&[5, 0]).await?;
+            let mut header = [0; 4];
+            socket.read_exact(&mut header).await?;
+            let length = match header[3] {
+                1 => 4,
+                4 => 16,
+                3 => usize::from(socket.read_u8().await?),
+                other => bail!("unexpected address type {other}"),
+            };
+            let mut address = vec![0; length];
+            socket.read_exact(&mut address).await?;
+            assert_eq!(socket.read_u16().await?, 22);
+            socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await?;
+            Ok::<_, anyhow::Error>((header[3], address))
+        });
+        tokio::time::timeout(Duration::from_secs(5), connect(host, 22, Some(&proxy))).await??;
+        serving.await?
+    }
+    #[tokio::test]
+    async fn socks5_resolves_locally_and_ip_literals_are_sent_as_addresses() -> Result<()> {
+        let (kind, address) = socks_request("socks5", "localhost").await?;
+        let resolved = match kind {
+            1 => std::net::IpAddr::from(<[u8; 4]>::try_from(address.as_slice())?),
+            4 => std::net::IpAddr::from(<[u8; 16]>::try_from(address.as_slice())?),
+            other => bail!("socks5 sent address type {other} instead of a resolved address"),
+        };
+        assert!(resolved.is_loopback());
+        assert_eq!(
+            socks_request("socks5h", "localhost").await?,
+            (3, b"localhost".to_vec())
+        );
+        for scheme in ["socks5", "socks5h"] {
+            assert_eq!(
+                socks_request(scheme, "192.0.2.7").await?,
+                (1, vec![192, 0, 2, 7])
+            );
+            for host in ["2001:db8::1", "[2001:db8::1]"] {
+                let expected: std::net::Ipv6Addr = "2001:db8::1".parse()?;
+                assert_eq!(
+                    socks_request(scheme, host).await?,
+                    (4, expected.octets().to_vec())
+                );
+            }
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn http_connect_brackets_ipv6_targets_once() -> Result<()> {
+        for host in ["::1", "[::1]"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let proxy = Proxy {
+                id: Uuid::new_v4(),
+                name: "fixture".into(),
+                url: format!("http://{}", listener.local_addr()?),
+                username: String::new(),
+            };
+            let serving = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await?;
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    header.push(socket.read_u8().await?);
+                }
+                socket.write_all(b"HTTP/1.1 200 Connected\r\n\r\n").await?;
+                Ok::<_, anyhow::Error>(String::from_utf8(header)?)
+            });
+            tokio::time::timeout(Duration::from_secs(5), connect(host, 22, Some(&proxy))).await??;
+            assert!(serving.await??.starts_with("CONNECT [::1]:22 HTTP/1.1\r\n"));
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn direct_connections_disable_nagle() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let stream = connect("127.0.0.1", port, None).await?;
+        assert!(stream.nodelay()?);
+        Ok(())
+    }
+}
 #[cfg(test)]
 mod transport_security_tests {
     use super::*;

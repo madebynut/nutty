@@ -4,9 +4,7 @@ use super::*;
 use russh::client::Handler as _;
 use russh::server::{self, Server as _, Session, VerifiedPublicKey};
 
-#[path = "sftp_test_server.rs"]
-mod sftp_fixture;
-use sftp_fixture::Files;
+use crate::sftp_test_server::Files;
 #[path = "native_shell_fixture.rs"]
 mod native_shell_fixture;
 use native_shell_fixture::NativeShell;
@@ -506,7 +504,10 @@ impl server::Handler for EchoHandler {
         port: &mut u32,
         session: &mut Session,
     ) -> Result<bool> {
-        let listener = TcpListener::bind((address, u16::try_from(*port)?)).await?;
+        // Like sshd, a port that is still held is refused without ending the session.
+        let Ok(listener) = TcpListener::bind((address, u16::try_from(*port)?)).await else {
+            return Ok(false);
+        };
         let address = listener.local_addr()?;
         *port = u32::from(address.port());
         let cancel = self.cancel.child_token();
@@ -612,6 +613,7 @@ async fn host_identity_requires_first_use_approval_and_rejects_changed_keys() ->
         prompts,
         remote_routes: Arc::new(Mutex::new(HashMap::new())),
         remote_budget: Arc::new(tokio::sync::Semaphore::new(128)),
+        prompting: watch::channel(false).0,
     };
     let expected = key.fingerprint(keys::HashAlg::Sha256).to_string();
     let accepted = async {
@@ -2336,6 +2338,176 @@ async fn canceled_shell_start_closes_its_channel_without_disconnect() -> Result<
             !node.list(".").await?.is_empty(),
             "independent SFTP must stay usable"
         );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+/// Connects to `server` with a pre-trusted host key, so no identity prompt is shown.
+async fn trusted_node(
+    server: &TestServer,
+    directory: &Path,
+    id: u128,
+) -> Result<(Arc<Registry>, Arc<Node>, Connection)> {
+    let key = keys::PrivateKey::random(&mut rand::rng(), keys::Algorithm::Ed25519)?;
+    let key_path = directory.join("identity");
+    std::fs::write(
+        &key_path,
+        key.to_openssh(keys::ssh_key::LineEnding::LF)?.as_bytes(),
+    )?;
+    keys::known_hosts::learn_known_hosts_path(
+        "127.0.0.1",
+        server.address.port(),
+        &server.key,
+        directory.join("known_hosts"),
+    )?;
+    let connection = connection(server, key_path, id, None);
+    let (prompts, _) = async_channel::bounded(1);
+    let registry = Arc::new(Registry::new(directory, prompts));
+    let node = registry
+        .connect(connection.id, std::slice::from_ref(&connection))
+        .await?;
+    Ok((registry, node, connection))
+}
+/// Simulates a network drop: the client transport ends, the server is not told.
+async fn lose_transport(node: &Node) -> Result<()> {
+    node.handle()
+        .await
+        .disconnect(
+            russh::Disconnect::ByApplication,
+            "fixture network loss",
+            "en",
+        )
+        .await?;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !node.handle().await.is_closed() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("transport did not close")
+}
+#[tokio::test]
+async fn permission_changes_send_only_the_mode() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let directory = tempfile::tempdir()?;
+        let server = TestServer::start().await?;
+        let (registry, node, _) = trusted_node(&server, directory.path(), 9911).await?;
+        // A size, owner or time sent back from an earlier stat would also be applied:
+        // a file that grew in between would be truncated.
+        for (path, mode) in [("source.txt", 0o640), ("folder", 0o750)] {
+            node.file_operation(FileOperation::Permissions {
+                path: path.into(),
+                mode,
+            })
+            .await?;
+        }
+        let sent = server.files.setstats().await;
+        assert_eq!(
+            sent.iter().map(|a| a.permissions).collect::<Vec<_>>(),
+            [Some(0o640), Some(0o750)]
+        );
+        for attributes in &sent {
+            assert!(
+                attributes.size.is_none()
+                    && attributes.uid.is_none()
+                    && attributes.gid.is_none()
+                    && attributes.atime.is_none()
+                    && attributes.mtime.is_none(),
+                "{attributes:?}"
+            );
+        }
+        registry.disconnect(node.connection.id).await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+#[tokio::test]
+async fn reconnect_survives_a_remote_forward_the_server_still_holds() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let directory = tempfile::tempdir()?;
+        let server = TestServer::start().await?;
+        let (registry, node, connection) = trusted_node(&server, directory.path(), 9912).await?;
+        let reserved = TcpListener::bind("127.0.0.1:0").await?;
+        let address = reserved.local_addr()?;
+        drop(reserved);
+        let forward = node
+            .forward_remote(address, ("127.0.0.1".into(), 9))
+            .await?;
+        // The fixture keeps the old session's listener, like sshd before it notices the drop.
+        lose_transport(&node).await?;
+        let reconnected = registry
+            .connect(connection.id, std::slice::from_ref(&connection))
+            .await?;
+        assert!(Arc::ptr_eq(&node, &reconnected));
+        assert!(!node.handle().await.is_closed());
+        assert!(
+            forward.cancel.is_cancelled(),
+            "the refused forward reports that it stopped"
+        );
+        assert!(!node.cancel.is_cancelled());
+        assert!(
+            !node.list(".").await?.is_empty(),
+            "SFTP uses the new transport"
+        );
+        registry.disconnect(node.connection.id).await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+#[tokio::test]
+async fn edited_connection_replaces_a_node_whose_transport_died() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let directory = tempfile::tempdir()?;
+        let server = TestServer::start().await?;
+        let (registry, node, mut connection) =
+            trusted_node(&server, directory.path(), 9913).await?;
+        lose_transport(&node).await?;
+        // Editing the connection disconnects the stale node before connecting again.
+        connection.name = "edited".into();
+        let replaced = registry
+            .connect(connection.id, std::slice::from_ref(&connection))
+            .await?;
+        assert!(!Arc::ptr_eq(&node, &replaced));
+        assert!(node.cancel.is_cancelled());
+        lose_transport(&replaced).await?;
+        registry.disconnect(connection.id).await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+#[tokio::test]
+async fn host_identity_decision_time_is_not_part_of_the_connect_timeout() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let directory = tempfile::tempdir()?;
+        let server = TestServer::start().await?;
+        let key = keys::PrivateKey::random(&mut rand::rng(), keys::Algorithm::Ed25519)?;
+        let key_path = directory.path().join("identity");
+        std::fs::write(
+            &key_path,
+            key.to_openssh(keys::ssh_key::LineEnding::LF)?.as_bytes(),
+        )?;
+        let mut connection = connection(&server, key_path, 9914, None);
+        connection.ssh.connect_timeout_seconds = 1;
+        let (prompts, receiver) = async_channel::bounded::<HostPrompt>(1);
+        let approving = tokio::spawn(async move {
+            let prompt = receiver.recv().await?;
+            // The user takes longer than the whole network timeout to decide.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let _ = prompt.answer.send(true);
+            Ok::<_, anyhow::Error>(())
+        });
+        let registry = Arc::new(Registry::new(directory.path(), prompts));
+        let node = registry
+            .connect(connection.id, std::slice::from_ref(&connection))
+            .await?;
+        approving.await??;
+        assert!(verify_host_key(
+            "127.0.0.1",
+            server.address.port(),
+            &server.key,
+            &directory.path().join("known_hosts")
+        )?);
+        registry.disconnect(node.connection.id).await?;
         Ok::<_, anyhow::Error>(())
     })
     .await?

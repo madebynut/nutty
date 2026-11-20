@@ -128,7 +128,8 @@ impl Row {
                 return None;
             }
         };
-        if image_row > 4096 || image_column > 4096 {
+        // The third diacritic is the id's high byte; larger table indices would alias.
+        if image_row > 4096 || image_column > 4096 || msb > 0xFF {
             self.previous = None;
             return None;
         }
@@ -210,5 +211,44 @@ mod tests {
                 .is_none(),
             "a gap does not invent a column"
         );
+    }
+
+    #[test]
+    fn high_byte_beyond_255_is_rejected_instead_of_aliasing() {
+        let mark = |index: usize| char::from_u32(DIACRITICS[index]).expect("diacritic");
+        assert!(DIACRITICS.len() > 257);
+        let mut row = Row::default();
+        let highest = row
+            .observe(
+                0,
+                false,
+                PLACEHOLDER,
+                &[mark(0), mark(0), mark(255)],
+                Some(7),
+                0,
+            )
+            .expect("high byte 255");
+        assert_eq!(highest.image, 0xFF00_0007);
+        // These previously wrapped to the ids of high bytes 0 and `len - 257`.
+        for index in [256, DIACRITICS.len() - 1] {
+            let mut row = Row::default();
+            assert!(
+                row.observe(
+                    0,
+                    false,
+                    PLACEHOLDER,
+                    &[mark(0), mark(0), mark(index)],
+                    Some(7),
+                    0
+                )
+                .is_none(),
+                "{index}"
+            );
+            assert!(
+                row.observe(1, false, PLACEHOLDER, &[], Some(7), 0)
+                    .is_none(),
+                "nothing is inherited from a rejected cell"
+            );
+        }
     }
 }

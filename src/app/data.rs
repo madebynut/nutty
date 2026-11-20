@@ -189,6 +189,7 @@ impl WorkspaceView {
             .update(cx, |input, cx| input.set_value("", window, cx));
         let id = Uuid::new_v4();
         self.data_busy = Some(id);
+        let current = self.store.profile.clone();
         let prompt = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: true,
             directories: false,
@@ -205,6 +206,7 @@ impl WorkspaceView {
                             crate::portable::load(
                                 &path,
                                 (!password.is_empty()).then_some(password.as_str()),
+                                &current,
                             )
                         })
                         .await
@@ -234,7 +236,11 @@ impl WorkspaceView {
             return;
         };
         let result = if self.data_replace {
-            crate::portable::replace(&self.store.profile, &preview.archive)
+            crate::portable::replace(
+                &self.store.profile,
+                &preview.archive,
+                &preview.unchanged_secrets,
+            )
         } else {
             crate::portable::merge(&self.store.profile, &preview.archive)
         };

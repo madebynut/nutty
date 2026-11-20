@@ -3,7 +3,7 @@
 use anyhow::{Context as _, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{Cursor, Read as _},
     path::Path,
     sync::{
@@ -116,6 +116,15 @@ struct Stored {
     reserved: usize,
     previous: Option<Previous>,
     memory: Arc<ImageMemory>,
+    /// Sixel and iTerm images have no id a client could place again.
+    anonymous: bool,
+    /// Last transmission or placement, for least-recently-used eviction.
+    touched: u64,
+}
+impl Stored {
+    fn footprint(&self) -> usize {
+        self.reserved + self.previous.as_ref().map(|old| old.reserved).unwrap_or(0)
+    }
 }
 struct Previous {
     version: Uuid,
@@ -125,6 +134,7 @@ struct Previous {
     reserved: usize,
     placements: Vec<Placement>,
     memory: Arc<ImageMemory>,
+    anonymous: bool,
 }
 #[derive(Clone)]
 struct Placement {
@@ -157,6 +167,7 @@ pub(super) struct Graphics {
     placements: Vec<Placement>,
     current: Option<Decode>,
     next: u32,
+    clock: u64,
     pub region: Option<(i32, i32)>,
     pub allow_files: bool,
     pub sixel_display_mode: bool,
@@ -477,8 +488,7 @@ impl Graphics {
             let mode = params.get("d").map(String::as_str).unwrap_or("a");
             match mode {
                 "a" | "A" => {
-                    self.placements
-                        .retain(|item| item.placeholder || item.alternate != alternate);
+                    self.retain_placements(|item| item.placeholder || item.alternate != alternate);
                     if mode == "A" {
                         self.images
                             .retain(|id, _| self.placements.iter().any(|item| item.image == *id));
@@ -486,7 +496,7 @@ impl Graphics {
                     }
                 }
                 "i" | "I" => {
-                    self.placements.retain(|item| {
+                    self.retain_placements(|item| {
                         item.image != id || (placement != 0 && item.id != placement)
                     });
                     if mode == "I" {
@@ -496,7 +506,7 @@ impl Graphics {
                 "p" | "P" => {
                     let x = number(&params, "x", 1) as f32 - 1.;
                     let y = number(&params, "y", 1) as f32 - 1.;
-                    self.placements.retain(|item| {
+                    self.retain_placements(|item| {
                         item.placeholder
                             || item.alternate != alternate
                             || x < item.column
@@ -507,7 +517,7 @@ impl Graphics {
                 }
                 "z" | "Z" => {
                     let z = signed(&params, "z", 0);
-                    self.placements.retain(|item| {
+                    self.retain_placements(|item| {
                         item.placeholder || item.alternate != alternate || item.z != z
                     });
                 }
@@ -672,13 +682,11 @@ impl Graphics {
             );
             width as usize * height as usize * 8
         };
-        let used: usize = self
+        let mut used: usize = self
             .images
             .iter()
             .filter(|(id, _)| **id != transmission.id)
-            .map(|(_, image)| {
-                image.reserved + image.previous.as_ref().map(|old| old.reserved).unwrap_or(0)
-            })
+            .map(|(_, image)| image.footprint())
             .sum();
         let old_reserve =
             self.images
@@ -693,12 +701,46 @@ impl Graphics {
                     )
                 })
                 .unwrap_or(0);
-        ensure!(
-            used + reserve + old_reserve <= MAX_MEMORY
-                && (self.images.len() < 128 || self.images.contains_key(&transmission.id)),
-            "graphics memory budget exhausted"
-        );
-        let memory = ImageMemory::reserve(reserve)?;
+        // Like kitty, make room by freeing unplaced images, least recently used first.
+        // Probes never evict, and nothing is evicted when even all candidates would not
+        // make enough room.
+        let mut victims: Option<std::vec::IntoIter<u32>> = None;
+        let memory = loop {
+            let error = if used + reserve + old_reserve <= MAX_MEMORY
+                && (self.images.len() < 128 || self.images.contains_key(&transmission.id))
+            {
+                match ImageMemory::reserve(reserve) {
+                    Ok(memory) => break memory,
+                    Err(error) => error,
+                }
+            } else {
+                anyhow::anyhow!("graphics memory budget exhausted")
+            };
+            if victims.is_none() {
+                let candidates = self.evictable(transmission.id);
+                let freed: usize = candidates
+                    .iter()
+                    .filter_map(|id| self.images.get(id))
+                    .map(Stored::footprint)
+                    .sum();
+                let kept = self.images.len() - candidates.len();
+                let fits = !transmission.query
+                    && used.saturating_sub(freed) + reserve + old_reserve <= MAX_MEMORY
+                    && (kept < 128 || self.images.contains_key(&transmission.id))
+                    && TOTAL_MEMORY.load(Ordering::Acquire).saturating_sub(freed) + reserve
+                        <= MAX_TOTAL_MEMORY;
+                if !fits {
+                    return Err(error);
+                }
+                victims = Some(candidates.into_iter());
+            }
+            let Some(victim) = victims.as_mut().and_then(Iterator::next) else {
+                return Err(error);
+            };
+            if let Some(image) = self.images.remove(&victim) {
+                used -= image.footprint();
+            }
+        };
         transmission.memory = Some(memory.clone());
         if transmission.query && !transmission.file {
             ensure!(
@@ -730,6 +772,7 @@ impl Graphics {
                     height: image.height,
                     reserved: image.reserved,
                     memory: image.memory,
+                    anonymous: image.anonymous,
                     placements: self
                         .placements
                         .iter()
@@ -739,6 +782,7 @@ impl Graphics {
                 })
             })
         });
+        let touched = self.tick();
         self.images.insert(
             transmission.id,
             Stored {
@@ -749,6 +793,8 @@ impl Graphics {
                 reserved: reserve,
                 previous,
                 memory,
+                anonymous: transmission.inline.is_some(),
+                touched,
             },
         );
         let (columns, rows) = if transmission
@@ -780,7 +826,9 @@ impl Graphics {
         })
     }
     fn rollback(&mut self, id: u32) {
-        let previous = self.images.remove(&id).and_then(|stored| stored.previous);
+        let stored = self.images.remove(&id);
+        let touched = stored.as_ref().map_or(0, |stored| stored.touched);
+        let previous = stored.and_then(|stored| stored.previous);
         self.placements.retain(|item| item.image != id);
         if let Some(previous) = previous {
             self.placements.extend(previous.placements);
@@ -794,6 +842,8 @@ impl Graphics {
                     reserved: previous.reserved,
                     previous: None,
                     memory: previous.memory,
+                    anonymous: previous.anonymous,
+                    touched,
                 },
             );
         }
@@ -859,6 +909,10 @@ impl Graphics {
             alternate,
             placeholder: number(params, "U", 0) == 1,
         });
+        let touched = self.tick();
+        if let Some(image) = self.images.get_mut(&id) {
+            image.touched = touched;
+        }
         Ok(
             if number(params, "U", 0) == 1 || number(params, "C", 0) == 1 {
                 (0, 0)
@@ -1011,7 +1065,7 @@ impl Graphics {
             return;
         }
         let history_scroll = top == 0 && bottom == lines as i32 - 1 && !alternate && amount > 0;
-        self.placements.retain_mut(|placement| {
+        self.retain_placements(|placement| {
             if placement.alternate != alternate {
                 return true;
             }
@@ -1027,7 +1081,57 @@ impl Graphics {
         });
     }
     pub fn clear_alternate(&mut self) {
-        self.placements.retain(|item| !item.alternate);
+        self.retain_placements(|item| !item.alternate);
+    }
+    /// Keeps the placements `keep` accepts and frees anonymous images left without any,
+    /// as kitty does for images without a client id. Only removals cost extra work.
+    fn retain_placements(&mut self, mut keep: impl FnMut(&mut Placement) -> bool) {
+        let images = &self.images;
+        let mut released = Vec::new();
+        self.placements.retain_mut(|placement| {
+            let kept = keep(placement);
+            if !kept
+                && images
+                    .get(&placement.image)
+                    .is_some_and(|image| image.anonymous)
+            {
+                released.push(placement.image);
+            }
+            kept
+        });
+        for id in released {
+            if !self
+                .placements
+                .iter()
+                .any(|placement| placement.image == id)
+            {
+                self.images.remove(&id);
+            }
+        }
+    }
+    /// Images that may be freed under memory pressure, least recently used first: any
+    /// without placements except `keep` and those whose decode has not completed.
+    fn evictable(&self, keep: u32) -> Vec<u32> {
+        let placed: HashSet<u32> = self.placements.iter().map(|item| item.image).collect();
+        let mut images: Vec<_> = self
+            .images
+            .iter()
+            .filter(|(id, image)| {
+                **id != keep
+                    && !placed.contains(id)
+                    && image
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| data.id == image.version)
+            })
+            .map(|(id, image)| (image.touched, *id))
+            .collect();
+        images.sort_unstable();
+        images.into_iter().map(|(_, id)| id).collect()
+    }
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
     }
 }
 fn number(params: &HashMap<String, String>, key: &str, default: u32) -> u32 {
@@ -1058,6 +1162,18 @@ fn failure(error: &anyhow::Error, file: bool) -> String {
         .take(256)
         .collect();
     format!("EINVAL:{text}")
+}
+/// A client-created temporary file as defined by the kitty graphics protocol: its
+/// resolved path is in a temporary directory and contains `tty-graphics-protocol`.
+fn protocol_temp_file(path: &Path) -> bool {
+    path.to_string_lossy().contains("tty-graphics-protocol")
+        && [
+            std::env::temp_dir(),
+            std::path::PathBuf::from("/tmp"),
+            std::path::PathBuf::from("/dev/shm"),
+        ]
+        .iter()
+        .any(|root| std::fs::canonicalize(root).is_ok_and(|root| path.starts_with(root)))
 }
 /// File media may only name local absolute paths outside kernel pseudo-filesystems.
 fn local_image_path(path: &Path) -> bool {
@@ -1094,6 +1210,7 @@ impl Decode {
         let bytes = STANDARD
             .decode(&self.encoded)
             .context("invalid base64 image data")?;
+        let mut remove = None;
         let bytes = if self.file {
             let path = std::str::from_utf8(&bytes).context("image filename is not UTF-8")?;
             ensure!(
@@ -1107,6 +1224,19 @@ impl Decode {
             ensure!(
                 local_image_path(&path) && std::fs::metadata(&path)?.is_file(),
                 "image payload is not a regular file"
+            );
+            // Any bytes are valid raw pixels, so success alone would tell the client
+            // whether an arbitrary file (an SSH key, say) holds at least `O + S` bytes.
+            // Raw data is therefore only read from files named as protocol temporary
+            // files, which is how kitty's icat writes it (in whatever directory the
+            // client's TMPDIR names); other files must decode as PNG. Every failure
+            // gets the same reply, see `failure`.
+            let temporary = protocol_temp_file(&path);
+            ensure!(
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains("tty-graphics-protocol"))
+                    || number(&self.params, "f", 32) == 100,
+                "raw image data requires a graphics protocol temporary file"
             );
             let mut options = std::fs::OpenOptions::new();
             options.read(true);
@@ -1133,17 +1263,11 @@ impl Decode {
             })
             .read_to_end(&mut bytes)?;
             ensure!(bytes.len() <= MAX_ENCODED, "image file exceeds budget");
-            if self.params.get("t").is_some_and(|medium| medium == "t")
-                && path.to_string_lossy().contains("tty-graphics-protocol")
-                && [
-                    std::env::temp_dir(),
-                    std::path::PathBuf::from("/tmp"),
-                    std::path::PathBuf::from("/dev/shm"),
-                ]
-                .iter()
-                .any(|root| std::fs::canonicalize(root).is_ok_and(|root| path.starts_with(root)))
-            {
-                std::fs::remove_file(path)?;
+            // Unlike kitty, which unlinks a temporary file as soon as it is opened, the
+            // file is only removed once it decoded as an image, so output reaching the
+            // pane cannot delete arbitrary `tty-graphics-protocol` files under /tmp.
+            if temporary && self.params.get("t").is_some_and(|medium| medium == "t") {
+                remove = Some(path);
             }
             bytes
         } else {
@@ -1164,7 +1288,7 @@ impl Decode {
         };
         let width = number(&self.params, "s", 0);
         let height = number(&self.params, "v", 0);
-        match number(&self.params, "f", 32) {
+        let pixels = match number(&self.params, "f", 32) {
             100 => {
                 let mut reader =
                     image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png);
@@ -1192,7 +1316,13 @@ impl Decode {
                 image::RgbaImage::from_raw(width, height, bytes).context("invalid RGBA image")
             }
             _ => bail!("unsupported image format"),
+        }?;
+        if let Some(path) = remove
+            && let Err(error) = std::fs::remove_file(&path)
+        {
+            tracing::debug!(%error, "could not remove graphics temporary file");
         }
+        Ok(pixels)
     }
 }
 
@@ -1434,6 +1564,140 @@ mod tests {
         assert!(denied.decode.is_none());
         Ok(())
     }
+
+    #[test]
+    fn inline_images_are_freed_with_their_last_placement() -> Result<()> {
+        let mut graphics = Graphics::default();
+        // 200 × 2.75 MiB would exceed the 128 MiB pane budget if scrolled-off images stayed.
+        let frame = b"0;1q\"1;1;600;600#1;2;100;0;0!600~";
+        for _ in 0..200 {
+            let decode = graphics
+                .sixel(frame, (0, 0), false, (8., 16.))?
+                .decode
+                .context("sixel decode")?;
+            graphics.install(&decode, decode.pixels(), (8., 16.));
+            assert_eq!(graphics.images.len(), 1);
+            graphics.scroll(0, 23, 10_000, false, 0, 24);
+            assert!(graphics.placements.is_empty() && graphics.images.is_empty());
+        }
+        // Freed only once no placement is left; a kitty id survives losing its placements.
+        graphics.sixel(frame, (0, 0), false, (8., 16.))?;
+        let anonymous = *graphics.images.keys().next().context("inline image")?;
+        graphics.handle(
+            format!("a=p,i={anonymous},p=9,q=2").as_bytes(),
+            (0, 30),
+            false,
+            (8., 16.),
+        );
+        graphics.handle(
+            b"a=T,i=5,f=32,s=1,v=1,q=2;AQIDBA==",
+            (0, 0),
+            false,
+            (8., 16.),
+        );
+        // A region scroll removes the placements at row 0 but not the one at row 30.
+        graphics.scroll(0, 23, 40, false, 0, 48);
+        assert_eq!(graphics.placements.len(), 1);
+        assert!(graphics.images.contains_key(&anonymous) && graphics.images.contains_key(&5));
+        graphics.handle(b"a=d,d=a", (0, 0), false, (8., 16.));
+        assert!(!graphics.images.contains_key(&anonymous) && graphics.images.contains_key(&5));
+        Ok(())
+    }
+
+    #[test]
+    fn unplaced_images_are_evicted_least_recently_used_first_when_full() -> Result<()> {
+        let mut graphics = Graphics::default();
+        let send = |graphics: &mut Graphics, command: String| -> Result<()> {
+            let outcome = graphics.handle(command.as_bytes(), (0, 0), false, (8., 16.));
+            if let Some(decode) = outcome.decode {
+                graphics.install(&decode, decode.pixels(), (8., 16.));
+            }
+            ensure!(outcome.response.is_none(), "{:?}", outcome.response);
+            Ok(())
+        };
+        for id in 1..=128 {
+            send(
+                &mut graphics,
+                format!("a=t,i={id},f=32,s=1,v=1,q=1;AQIDBA=="),
+            )?;
+        }
+        // Image 1 is placed, image 2 was used again recently, image 3 is the oldest.
+        send(&mut graphics, "a=p,i=1,q=1".into())?;
+        send(&mut graphics, "a=p,i=2,q=1".into())?;
+        graphics.handle(b"a=d,d=i,i=2", (0, 0), false, (8., 16.));
+        send(&mut graphics, "a=t,i=200,f=32,s=1,v=1,q=1;AQIDBA==".into())?;
+        assert_eq!(graphics.images.len(), 128);
+        assert!(!graphics.images.contains_key(&3));
+        for id in [1, 2, 4, 200] {
+            assert!(graphics.images.contains_key(&id), "{id}");
+        }
+        // The pane's memory budget evicts the same way: 16 × 8 MiB fill it.
+        let mut graphics = Graphics::default();
+        let pixels = {
+            use std::io::Write as _;
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&vec![0; 1024 * 1024 * 4])?;
+            STANDARD.encode(encoder.finish()?)
+        };
+        for id in 1..=17 {
+            send(
+                &mut graphics,
+                format!("a=t,i={id},f=32,s=1024,v=1024,o=z,q=1;{pixels}"),
+            )?;
+        }
+        assert_eq!(graphics.images.len(), 16);
+        assert!(!graphics.images.contains_key(&1) && graphics.images.contains_key(&17));
+        // Images with live placements are never evicted.
+        let mut graphics = Graphics::default();
+        for id in 1..=128 {
+            send(
+                &mut graphics,
+                format!("a=T,i={id},f=32,s=1,v=1,q=1;AQIDBA=="),
+            )?;
+        }
+        assert!(send(&mut graphics, "a=t,i=200,f=32,s=1,v=1,q=1;AQIDBA==".into()).is_err());
+        assert_eq!(graphics.images.len(), 128);
+        assert!(!graphics.images.contains_key(&200));
+        // Support probes never evict.
+        let mut graphics = Graphics::default();
+        for id in 1..=128 {
+            send(
+                &mut graphics,
+                format!("a=t,i={id},f=32,s=1,v=1,q=1;AQIDBA=="),
+            )?;
+        }
+        graphics.handle(b"a=q,i=999,f=32,s=1,v=1;AQIDBA==", (0, 0), false, (8., 16.));
+        assert_eq!(graphics.images.len(), 128);
+        assert!(graphics.images.contains_key(&1));
+        // Nothing is evicted when evicting every candidate would still not make room.
+        let mut graphics = Graphics::default();
+        for id in 1..=4 {
+            send(
+                &mut graphics,
+                format!("a=t,i={id},f=32,s=1,v=1,q=1;AQIDBA=="),
+            )?;
+        }
+        // 15 placed 8 MiB images leave 8 MiB; a 16 MiB image cannot fit.
+        for id in 10..=24 {
+            send(
+                &mut graphics,
+                format!("a=T,i={id},f=32,s=1024,v=1024,o=z,q=1;{pixels}"),
+            )?;
+        }
+        assert_eq!(graphics.images.len(), 19);
+        assert!(
+            send(
+                &mut graphics,
+                format!("a=t,i=99,f=32,s=2048,v=1024,o=z,q=1;{pixels}"),
+            )
+            .is_err()
+        );
+        for id in 1..=4 {
+            assert!(graphics.images.contains_key(&id), "{id}");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1506,5 +1770,75 @@ mod file_media_tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn raw_file_media_do_not_reveal_the_size_of_arbitrary_files() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let secret = directory.path().join("id_ed25519");
+        std::fs::write(&secret, vec![b'k'; 411])?;
+        let mut graphics = Graphics {
+            allow_files: true,
+            ..Default::default()
+        };
+        for (path, offset) in [
+            (secret.clone(), 0),
+            (secret.clone(), 407),
+            (secret.clone(), 408),
+            (directory.path().join("missing"), 0),
+        ] {
+            for action in ["q", "T"] {
+                let frame = format!(
+                    "a={action},t=f,f=32,s=1,v=1,S=4,O={offset},i=7;{}",
+                    STANDARD.encode(path.to_string_lossy().as_bytes())
+                );
+                let decode = graphics
+                    .handle(frame.as_bytes(), (0, 0), false, (8., 20.))
+                    .decode
+                    .context("file media decode off the parser thread")?;
+                assert_eq!(
+                    graphics.install(&decode, decode.pixels(), (8., 20.)),
+                    Some(reply(7, "EINVAL:image file unavailable")),
+                    "a={action} O={offset} {}",
+                    path.display()
+                );
+            }
+        }
+        assert!(secret.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn temporary_files_are_removed_only_after_they_decode() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("tty-graphics-protocol-raw");
+        let mut graphics = Graphics {
+            allow_files: true,
+            ..Default::default()
+        };
+        let frame = format!(
+            "a=T,t=t,f=32,s=1,v=1,i=3,q=1;{}",
+            STANDARD.encode(path.to_string_lossy().as_bytes())
+        );
+        // Neither too short raw data nor a non-image file is deleted.
+        for contents in [&b"abc"[..], b"not an image"] {
+            std::fs::write(&path, contents)?;
+            let decode = graphics
+                .handle(frame.as_bytes(), (0, 0), false, (8., 20.))
+                .decode
+                .context("temporary file decode")?;
+            assert!(decode.pixels().is_err());
+            assert!(path.exists());
+            graphics.install(&decode, decode.pixels(), (8., 20.));
+        }
+        // kitty icat writes raw pixels to such a file; it still loads and is removed.
+        std::fs::write(&path, [1, 2, 3, 4])?;
+        let decode = graphics
+            .handle(frame.as_bytes(), (0, 0), false, (8., 20.))
+            .decode
+            .context("temporary file decode")?;
+        assert_eq!(decode.pixels()?.as_raw(), &[1, 2, 3, 4]);
+        assert!(!path.exists());
+        Ok(())
     }
 }

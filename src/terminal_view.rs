@@ -284,12 +284,21 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Sends typed input, which broadcast mode repeats in the tab's other panes.
     fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
-        self.blink_epoch = Instant::now();
-        if let Err(error) = self.terminal.engine.input(bytes.clone()) {
-            self.terminal.engine.fail(error.to_string());
-        } else {
+        if self.send_local(bytes.clone()) {
             cx.emit(PaneEvent::Input(bytes));
+        }
+    }
+    /// Sends pointer-originated input (mouse reports and alt-screen scroll keys),
+    /// which refers to this pane's screen and is never broadcast.
+    fn send_local(&mut self, bytes: Vec<u8>) -> bool {
+        self.blink_epoch = Instant::now();
+        if let Err(error) = self.terminal.engine.input(bytes) {
+            self.terminal.engine.fail(error.to_string());
+            false
+        } else {
+            true
         }
     }
 
@@ -350,13 +359,7 @@ impl TerminalView {
         )
     }
 
-    fn mouse_report(
-        &mut self,
-        position: Point<Pixels>,
-        button: u8,
-        released: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn mouse_report(&mut self, position: Point<Pixels>, button: u8, released: bool) {
         let (column, row) = self.coordinates(position);
         let bytes = if self.snapshot.mode.contains(TermMode::SGR_MOUSE) {
             format!(
@@ -377,7 +380,7 @@ impl TerminalView {
                 (row + 33).min(255) as u8,
             ]
         };
-        self.send(bytes, cx);
+        self.send_local(bytes);
     }
 
     fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
@@ -806,7 +809,7 @@ impl Render for TerminalView {
                     cx.emit(PaneEvent::Focused);
                     if view.snapshot.mode.intersects(TermMode::MOUSE_MODE) && !event.modifiers.shift
                     {
-                        view.mouse_report(event.position, 0, false, cx);
+                        view.mouse_report(event.position, 0, false);
                     } else {
                         let (column, row) = view.coordinates(event.position);
                         view.terminal.engine.select(
@@ -828,7 +831,7 @@ impl Render for TerminalView {
                 cx.listener(|view, event: &gpui_kit::MouseUpEvent, _, cx| {
                     if view.snapshot.mode.intersects(TermMode::MOUSE_MODE) && !event.modifiers.shift
                     {
-                        view.mouse_report(event.position, 0, true, cx);
+                        view.mouse_report(event.position, 0, true);
                     } else if view.preferences.terminal.copy_on_select
                         && let Some(text) = view.terminal.engine.selection()
                     {
@@ -836,27 +839,25 @@ impl Render for TerminalView {
                     }
                 }),
             )
-            .on_mouse_move(
-                cx.listener(|view, event: &gpui_kit::MouseMoveEvent, _, cx| {
-                    if view
-                        .snapshot
-                        .mode
-                        .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
-                        && !event.modifiers.shift
-                    {
-                        if event.dragging() {
-                            view.mouse_report(event.position, 32, false, cx);
-                        } else if view.snapshot.mode.contains(TermMode::MOUSE_MOTION) {
-                            view.mouse_report(event.position, 35, false, cx);
-                        }
-                    } else if event.dragging() {
-                        let (column, row) = view.coordinates(event.position);
-                        view.terminal
-                            .engine
-                            .select(column, row, true, SelectionType::Simple);
+            .on_mouse_move(cx.listener(|view, event: &gpui_kit::MouseMoveEvent, _, _| {
+                if view
+                    .snapshot
+                    .mode
+                    .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+                    && !event.modifiers.shift
+                {
+                    if event.dragging() {
+                        view.mouse_report(event.position, 32, false);
+                    } else if view.snapshot.mode.contains(TermMode::MOUSE_MOTION) {
+                        view.mouse_report(event.position, 35, false);
                     }
-                }),
-            )
+                } else if event.dragging() {
+                    let (column, row) = view.coordinates(event.position);
+                    view.terminal
+                        .engine
+                        .select(column, row, true, SelectionType::Simple);
+                }
+            }))
             .on_scroll(cx.listener(|view, event: &gpui_kit::ScrollEvent, _, cx| {
                 view.scroll_remainder += f32::from(event.delta.pixel_delta(view.line_height).y)
                     * view.preferences.terminal.scroll_speed
@@ -865,23 +866,15 @@ impl Render for TerminalView {
                 view.scroll_remainder -= lines as f32;
                 if view.snapshot.mode.intersects(TermMode::MOUSE_MODE) && !event.modifiers.shift {
                     for _ in 0..lines.unsigned_abs().min(100) {
-                        view.mouse_report(
-                            event.position,
-                            if lines > 0 { 64 } else { 65 },
-                            false,
-                            cx,
-                        );
+                        view.mouse_report(event.position, if lines > 0 { 64 } else { 65 }, false);
                     }
                 } else if view.snapshot.mode.contains(TermMode::ALT_SCREEN) {
                     for _ in 0..lines.unsigned_abs().min(100) {
-                        view.send(
-                            if lines > 0 {
-                                b"\x1b[A".to_vec()
-                            } else {
-                                b"\x1b[B".to_vec()
-                            },
-                            cx,
-                        );
+                        view.send_local(if lines > 0 {
+                            b"\x1b[A".to_vec()
+                        } else {
+                            b"\x1b[B".to_vec()
+                        });
                     }
                 } else {
                     view.terminal.engine.scroll(Scroll::Delta(lines));

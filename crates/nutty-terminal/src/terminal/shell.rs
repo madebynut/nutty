@@ -18,6 +18,10 @@ pub(super) struct Shell {
     pub input_pending: bool,
     pub track_directory: bool,
     location: Option<Location>,
+    /// Host label of the title-derived target that the last OSC 7 host replaced.
+    renamed_from: Option<String>,
+    /// A command was submitted or started (OSC 133;C) since that rename.
+    command_since_rename: bool,
     home: Option<String>,
     native_directory: bool,
     probe: Option<uuid::Uuid>,
@@ -48,8 +52,11 @@ impl Shell {
                         .rsplit_once('@')
                         .is_some_and(|(_, old)| old != host)
                 {
+                    let replaced = host_label(&target.name);
                     let user = target.name.split('@').next().unwrap_or_default();
                     self.change_target(format!("{user}@{host}"));
+                    self.renamed_from = Some(replaced);
+                    self.command_since_rename = false;
                 }
                 self.directory = Some(path);
                 self.native_directory = true;
@@ -96,6 +103,7 @@ impl Shell {
                     self.integrated = true;
                     self.prompt = None;
                     self.running = true;
+                    self.command_since_rename = true;
                 }
                 Some(b'D') => {
                     self.running = false;
@@ -106,11 +114,23 @@ impl Shell {
     }
 
     fn observe_location(&mut self, location: Location) {
-        if self
-            .location
-            .as_ref()
-            .is_some_and(|old| old.target != location.target)
-        {
+        let changed = match (&self.location, &self.target) {
+            (Some(old), _) => old.target != location.target,
+            // Renamed from an OSC 7 host, which may be a full name while titles show its first
+            // label; the user was only carried over.
+            // A title naming the host that OSC 7 just renamed is the same shell reporting
+            // two names (a PS1 nickname next to its DNS name), which both arrive at one
+            // prompt. It is a new session only when OSC 7 named this machine and a
+            // command ran there since: the remote shell exited and `ssh` ran again.
+            (None, Some(target)) => {
+                let label = host_label(&location.target);
+                host_label(&target.name) != label
+                    && (self.renamed_from.as_ref() != Some(&label)
+                        || self.command_since_rename && super::is_local_machine(&target.name))
+            }
+            (None, None) => false,
+        };
+        if changed {
             self.change_target(location.target.clone());
         }
         if self.target.is_none() {
@@ -142,6 +162,10 @@ impl Shell {
         self.location = Some(location);
     }
 
+    /// The user submitted a line, which may run `ssh` again.
+    pub fn command_submitted(&mut self) {
+        self.command_since_rename = true;
+    }
     fn change_target(&mut self, name: String) {
         self.reset_location();
         self.target = Some(super::DirectoryTarget {
@@ -171,6 +195,8 @@ impl Shell {
         self.prompt = None;
         self.running = false;
         self.location = None;
+        self.renamed_from = None;
+        self.command_since_rename = false;
         self.home = None;
         self.native_directory = false;
         self.probe = None;
@@ -214,11 +240,14 @@ impl Shell {
                 self.bootstrap_started = None;
             }
         }
-        let prompt = prompt.trim_end().strip_suffix(['$', '#', '%'])?.trim_end();
+        let trimmed = prompt.trim_end();
+        let terminator = trimmed.chars().last();
+        let prompt = trimmed.strip_suffix(['$', '#', '%'])?.trim_end();
         if prompt.contains(['$', '#']) {
             return None;
         }
-        self.observe_location(Location::parse(prompt)?);
+        let location = Location::parse(prompt).or_else(|| Location::zsh(prompt, terminator?))?;
+        self.observe_location(location);
         if let Some(shell) = self.detected_shell.take() {
             self.bootstrap_started = Some(Instant::now());
             return crate::shell_integration::remote_command(shell)
@@ -315,6 +344,44 @@ struct Location {
     path: String,
 }
 impl Location {
+    /// zsh's default `%n@%m %1~ %#` prompt: one directory word after the target. Titles
+    /// keep the stricter forms because a title like `user@host vim` names a program, and
+    /// switch CLIs such as `SSH@ICX7250 Router(config)#` must not receive a probe.
+    fn zsh(value: &str, terminator: char) -> Option<Self> {
+        if !matches!(terminator, '%' | '#') {
+            return None;
+        }
+        let (target, path) = value.split_once(' ')?;
+        // `%#` shows `#` for root; device CLIs such as `admin@fw01 config#` use it for any user.
+        if terminator == '#'
+            && target
+                .split_once('@')
+                .is_none_or(|(user, _)| user != "root")
+        {
+            return None;
+        }
+        let path = path.trim();
+        if path.is_empty()
+            || path.chars().any(|c| c.is_whitespace() || "()[]{}<>|;:%".contains(c))
+            // `user@host 50%` and `user@host progress=45%` are progress lines, not prompts;
+            // a directory such as `dt=2024-01-01` still is one.
+            || path
+                .rsplit('=')
+                .next()
+                .is_some_and(|value| value.chars().all(|c| c.is_ascii_digit() || c == '.'))
+            || !(path == "~"
+                || path.starts_with("~/")
+                || path.starts_with('/')
+                || path.chars().next().is_some_and(char::is_lowercase)
+                // Only unprivileged zsh (`%`) shows names like `Documents`; `#` is also
+                // the privileged prompt of switch CLIs.
+                || terminator == '%' && path.chars().next().is_some_and(char::is_alphanumeric)
+                || path.starts_with(['.', '_']))
+        {
+            return None;
+        }
+        Self::parse(&format!("[{target} {path}]"))
+    }
     fn parse(value: &str) -> Option<Self> {
         if value.len() > 4608 || value.chars().any(char::is_control) {
             return None;
@@ -349,6 +416,15 @@ impl Location {
             path: path.into(),
         })
     }
+}
+
+/// The host of `user@host` up to its first dot, as prompts show it (`%m`, `\h`).
+pub(super) fn host_label(target: &str) -> String {
+    let host = target.rsplit_once('@').map_or(target, |(_, host)| host);
+    host.split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 fn raw_directory(value: &[u8]) -> Option<String> {
@@ -592,6 +668,80 @@ mod tests {
             shell.directory.is_none(),
             "a basename cannot fabricate an absolute directory"
         );
+    }
+
+    #[test]
+    fn zsh_default_prompts_identify_jump_targets_but_titles_stay_strict() {
+        use crate::session_environment::Platform;
+        let mut shell = Shell::new(true);
+        shell.seed_target("ops@bastion".into(), true);
+        assert!(shell.probe_command("ops@bastion ~ % ").is_some());
+        shell.probe_not_sent();
+        let query = shell
+            .probe_command("admin@web01 logs % ")
+            .expect("zsh default prompt on the selected target");
+        assert!(query.contains("nutty-env;"));
+        let target = shell.target.clone().expect("target");
+        assert_eq!(target.name, "admin@web01");
+        assert!(!target.transport_bound, "jump target is not the gateway");
+        assert!(
+            shell.directory.is_none(),
+            "a basename cannot fabricate an absolute directory"
+        );
+        let id = shell.probe.expect("nonce");
+        shell.osc(
+            format!("777;nutty-env;{id};NUTTY_ENV_V1\n\nLinux\n6.8.0\nx86_64\n").as_bytes(),
+            Point::default(),
+        );
+        assert_eq!(
+            shell.environment.as_ref().map(|e| e.operating_system),
+            Some(Platform::Linux)
+        );
+        for prompt in [
+            "admin@web01$ ",
+            "Password for admin@web01 %$ ",
+            "web01 logs$ ",
+            "admin@web01 logs$ ",
+            "SSH@ICX7250-48 Router# ",
+            "SSH@ICX7250-48 Router(config)# ",
+            "deploy@web01 upload 100% ",
+            "deploy@web01 upload done % ",
+            "deploy@web01 50%",
+            "deploy@web01 99.5 %",
+        ] {
+            let mut other = Shell::new(true);
+            assert!(other.probe_command(prompt).is_none(), "{prompt}");
+        }
+        let mut root = Shell::new(true);
+        assert!(root.probe_command("root@web01 /var/log # ").is_some());
+        let mut documents = Shell::new(true);
+        assert!(documents.probe_command("admin@mac Documents % ").is_some());
+        let mut titles = Shell::new(true);
+        titles.osc(b"0;admin@web01 vim", Point::default());
+        assert!(titles.target.is_none(), "titles keep the strict forms");
+    }
+
+    #[test]
+    fn zsh_prompts_exclude_device_cli_and_status_lines() {
+        for prompt in [
+            "SSH@lab switch# ",
+            "admin@fw01 config# ",
+            "user@host x86_64 # ",
+            "deploy@web01 progress=45% ",
+        ] {
+            let mut shell = Shell::new(true);
+            assert!(shell.probe_command(prompt).is_none(), "{prompt}");
+        }
+        for prompt in [
+            "alice@mac ~ % ",
+            "alice@mac my-project % ",
+            "root@box /etc # ",
+            "root@box nginx # ",
+            "analyst@warehouse dt=2024-01-01 % ",
+        ] {
+            let mut shell = Shell::new(true);
+            assert!(shell.probe_command(prompt).is_some(), "{prompt}");
+        }
     }
 
     #[test]

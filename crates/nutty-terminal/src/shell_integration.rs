@@ -165,10 +165,14 @@ end
 "#;
 
 // POSIX PS1 expands these command substitutions at each primary prompt. Only the
-// current process is changed; no startup files or DEBUG traps are replaced.
+// current process is changed; no startup files or DEBUG traps are replaced. As in the
+// bash and zsh hooks, a directory name with control characters is not reported, since
+// it could end the frame and inject markers. Kept terse, as the whole bootstrap must
+// fit one canonical input line; `(pattern)` keeps older shells, such as bash 3.2 as
+// sh, from ending the `$(...)` at a pattern's `)`.
 const SH_INIT: &str = r#"if [ "${__nutty_sh_hook:-}" != 1 ]; then
     __nutty_sh_hook=1
-    PS1='$(printf "\033]1337;CurrentDir=%s\007\033]133;A\007" "$PWD")'"$PS1"'$(printf "\033]133;B\007")'
+    PS1='$(case $PWD in (*[[:cntrl:]]*);; (*)printf "\033]1337;CurrentDir=%s\007" "$PWD";;esac;printf "\033]133;A\007")'"$PS1"'$(printf "\033]133;B\007")'
 fi
 "#;
 
@@ -293,6 +297,45 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn posix_sh_prompt_does_not_report_directories_with_control_characters() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let bad = directory.path().join("bad\x07\x1b]133;C\x07");
+        let good = directory.path().join("good");
+        std::fs::create_dir(&bad)?;
+        std::fs::create_dir(&good)?;
+        // The fallback dash, ash and other POSIX shells run, with PS1 expanded as at a
+        // prompt. A good directory shows the hook ran at all.
+        let hooks = eval_script(SH_INIT, false);
+        for program in ["/bin/sh", "/bin/dash", "/bin/ash", "/bin/busybox"] {
+            if !Path::new(program).exists() {
+                continue;
+            }
+            for path in [&bad, &good] {
+                let mut command = std::process::Command::new(program);
+                if program.ends_with("busybox") {
+                    command.arg("sh");
+                }
+                let output = command
+                    .arg("-c")
+                    .arg(format!(r#"{hooks}; eval "printf '%s' \"$PS1\"""#))
+                    .current_dir(path)
+                    .output()?;
+                anyhow::ensure!(output.status.success(), "{program} rejected hooks");
+                let reported = output
+                    .stdout
+                    .windows(16)
+                    .any(|bytes| bytes == b"1337;CurrentDir=");
+                assert_eq!(reported, path == &good, "{program} {}", path.display());
+                assert!(
+                    !output.stdout.windows(5).any(|bytes| bytes == b"133;C"),
+                    "directory injected a command marker in {program}"
+                );
+                assert!(output.stdout.windows(5).any(|bytes| bytes == b"133;A"));
+            }
+        }
+        Ok(())
+    }
     #[test]
     fn zsh_startup_preserves_redirected_user_configuration_and_directory_hooks() -> Result<()> {
         if !Path::new("/bin/zsh").exists() {

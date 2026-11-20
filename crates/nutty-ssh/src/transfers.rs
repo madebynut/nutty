@@ -351,10 +351,18 @@ async fn run(
     while let Some(entry) = directories.next_entry().await? {
         scanned += 1;
         ensure!(scanned <= 1024, "传输存储目录项过多，请检查存储目录");
-        if Uuid::parse_str(&entry.file_name().to_string_lossy()).is_err()
-            || !entry.file_type().await?.is_dir()
-        {
+        if Uuid::parse_str(&entry.file_name().to_string_lossy()).is_err() {
             continue;
+        }
+        match entry.file_type().await {
+            Ok(kind) if kind.is_dir() => {}
+            Ok(_) => continue,
+            Err(e) => {
+                if errors.len() < 8 {
+                    errors.push(format!("无法恢复传输记录：{e:#}"));
+                }
+                continue;
+            }
         }
         if jobs.len() >= MAX_TASKS {
             errors.push("恢复任务超过上限，未加载剩余任务".into());
@@ -369,7 +377,7 @@ async fn run(
                 if j.state.pending() {
                     j.state = State::Paused;
                     j.error = Some("上次传输被中断，可校验后继续".into());
-                    j.save(&root).await?;
+                    persist(&mut j, &root).await;
                 }
                 jobs.push(j);
             }
@@ -383,6 +391,8 @@ async fn run(
     let mut error = (!errors.is_empty()).then(|| errors.join("；"));
     let mut active: HashMap<Uuid, Active> = HashMap::new();
     let mut workers = tokio::task::JoinSet::new();
+    // Identifies the job of a worker that panicked.
+    let mut worker_jobs: HashMap<tokio::task::Id, Uuid> = HashMap::new();
     let mut retries = HashMap::new();
     let mut shutdown: Option<oneshot::Sender<()>> = None;
     let mut stopping = false;
@@ -417,7 +427,7 @@ async fn run(
                 } {
                     j.state = State::Failed;
                     j.error = Some(e.to_string());
-                    j.save(&root).await?;
+                    persist(j, &root).await;
                     continue;
                 }
                 j.state = if cleanup {
@@ -426,7 +436,9 @@ async fn run(
                     State::Preparing
                 };
                 j.error = None;
-                j.save(&root).await?;
+                if !persist(j, &root).await {
+                    continue;
+                }
                 let (progress, receiver) = watch::channel(Progress {
                     bytes: j.bytes,
                     total: j.total,
@@ -443,11 +455,13 @@ async fn run(
                         requested: None,
                     },
                 );
+                let id = j.id;
                 let j = j.clone();
                 let root = root.clone();
                 let registry = registry.clone();
-                workers
+                let task = workers
                     .spawn(async move { work(j, root, registry, progress, cancel, cleanup).await });
+                worker_jobs.insert(task.id(), id);
             }
         }
         let tasks = jobs
@@ -485,28 +499,37 @@ async fn run(
         }
         tokio::select! {
             biased;
-            Some(result)=workers.join_next(),if !workers.is_empty()=>{
-                match result {
-                    Ok((mut j,result))=>{
-                        let request=active.remove(&j.id).and_then(|a|a.requested);
-                        if request==Some(State::Canceling) {j.cleanup_requested=true;j.restart_requested=false;}
-                        if let Err(e)=result {
-                            let transient=retryable(&e);j.error=Some(format!("{e:#}").chars().take(2048).collect());
-                            if transient && !stopping && request.is_none() && j.attempt<3 {j.attempt+=1;j.state=State::Retrying;retries.insert(j.id,tokio::time::Instant::now()+Duration::from_secs(1<<j.attempt));}else{j.state=State::Failed;}
-                        }
-                        if j.state!=State::Complete {
-                            if stopping || request==Some(State::Pausing){j.state=State::Paused;}
-                            else if request==Some(State::Canceling){j.cleanup_requested=true;j.state=State::Canceling;}
-                        }
-                        if let Err(e)=j.save(&root).await{j.state=State::Failed;j.error=Some(format!("无法保存传输状态：{e:#}"));}
-                        if let Some(existing)=jobs.iter_mut().find(|old|old.id==j.id){*existing=j;}
+            Some(joined)=workers.join_next_with_id(),if !workers.is_empty()=>{
+                let finished=match joined {
+                    Ok((task,output))=>{worker_jobs.remove(&task);Some(output)},
+                    // A panic fails only its job. The worker's last checkpoint on disk is
+                    // newer than the scheduler's copy, so the failure is recorded on it.
+                    Err(e)=>match worker_jobs.remove(&e.id()).and_then(|id|jobs.iter().find(|j|j.id==id)) {
+                        Some(stale)=>{
+                            let saved=job::read_job(&stale.folder(&root).join("task.json")).await.ok().filter(|j|j.id==stale.id);
+                            Some((saved.unwrap_or_else(||stale.clone()),Err(anyhow::anyhow!("传输工作线程异常：{e}"))))
+                        },
+                        None=>None,
                     },
-                    Err(e)=>{error=Some(format!("传输工作线程异常：{e}"));stopping=true;for a in active.values(){a.cancel.cancel();}active.clear();}
+                };
+                if let Some((mut j,result))=finished {
+                    let request=active.remove(&j.id).and_then(|a|a.requested);
+                    if request==Some(State::Canceling) {j.cleanup_requested=true;j.restart_requested=false;}
+                    if let Err(e)=result {
+                        let transient=retryable(&e);j.error=Some(format!("{e:#}").chars().take(2048).collect());
+                        if transient && !stopping && request.is_none() && j.attempt<3 {j.attempt+=1;j.state=State::Retrying;retries.insert(j.id,tokio::time::Instant::now()+Duration::from_secs(1<<j.attempt));}else{j.state=State::Failed;}
+                    }
+                    if j.state!=State::Complete {
+                        if stopping || request==Some(State::Pausing){j.state=State::Paused;}
+                        else if request==Some(State::Canceling){j.cleanup_requested=true;j.state=State::Canceling;}
+                    }
+                    persist(&mut j,&root).await;
+                    if let Some(existing)=jobs.iter_mut().find(|old|old.id==j.id){*existing=j;}
                 }
             },
             command=commands.recv(),if !stopping=>match command {
                 Some(Command::Configure(c))=>configuration=c,
-                Some(Command::Shutdown(answer))=>{shutdown=Some(answer);stopping=true;for a in active.values(){a.cancel.cancel();}for j in &mut jobs{if !active.contains_key(&j.id) && matches!(j.state,State::Queued|State::Retrying|State::Canceling){j.state=State::Paused;j.save(&root).await?;}}},
+                Some(Command::Shutdown(answer))=>{shutdown=Some(answer);stopping=true;for a in active.values(){a.cancel.cancel();}for j in &mut jobs{if !active.contains_key(&j.id) && matches!(j.state,State::Queued|State::Retrying|State::Canceling){j.state=State::Paused;persist(j,&root).await;}}},
                 Some(Command::Enqueue{connection,local,remote,direction})=>{
                     let result=async {
                         ensure!(jobs.len()<MAX_TASKS,"传输队列最多 128 个任务，请移除已完成记录");
@@ -531,18 +554,21 @@ async fn run(
                                     j.publishing = false;
                                     j.state = State::Queued;
                                     j.attempt = 0;
-                                    j.save(&root).await?;
+                                    persist(j, &root).await;
                                 }
                             },
                             Action::Skip if j.state == State::Failed && j.conflict.is_some() => {
                                 j.publishing=false; j.skip_requested=true; j.cleanup_requested=true;
-                                j.state=State::Canceling; j.save(&root).await?;
+                                j.state=State::Canceling; persist(j, &root).await;
                             },
-                            Action::Pause if j.state.pending()=>{j.state=State::Paused;j.save(&root).await?;},
-                            Action::Resume if matches!(j.state,State::Paused|State::Failed)=>{j.state=State::Queued;j.attempt=0;j.request.limit=configuration.limit;retries.remove(&id);j.save(&root).await?;},
-                            Action::Restart if matches!(j.state,State::Paused|State::Failed)=>{j.restart_requested=true;j.cleanup_requested=true;j.state=State::Canceling;j.save(&root).await?;},
-                            Action::Cancel if !matches!(j.state,State::Complete|State::Canceled|State::Skipped)=>{j.restart_requested=false;j.cleanup_requested=true;j.state=State::Canceling;j.save(&root).await?;},
-                            Action::Remove if matches!(j.state,State::Complete|State::Canceled|State::Skipped)=>{tokio::fs::remove_dir_all(j.folder(&root)).await?;jobs.remove(index);},_=>{}
+                            Action::Pause if j.state.pending()=>{j.state=State::Paused;persist(j,&root).await;},
+                            Action::Resume if matches!(j.state,State::Paused|State::Failed)=>{j.state=State::Queued;j.attempt=0;j.request.limit=configuration.limit;retries.remove(&id);persist(j,&root).await;},
+                            Action::Restart if matches!(j.state,State::Paused|State::Failed)=>{j.restart_requested=true;j.cleanup_requested=true;j.state=State::Canceling;persist(j,&root).await;},
+                            Action::Cancel if !matches!(j.state,State::Complete|State::Canceled|State::Skipped)=>{j.restart_requested=false;j.cleanup_requested=true;j.state=State::Canceling;persist(j,&root).await;},
+                            Action::Remove if matches!(j.state,State::Complete|State::Canceled|State::Skipped)=>match tokio::fs::remove_dir_all(j.folder(&root)).await {
+                                Err(e) if e.kind()!=std::io::ErrorKind::NotFound=>j.error=Some(format!("无法移除传输记录：{e:#}")),
+                                _=>{jobs.remove(index);},
+                            },_=>{}
                         }}
                     }
                 },
@@ -553,6 +579,17 @@ async fn run(
         }
     }
     Ok(())
+}
+/// Saves a job. A storage error fails that job instead of the whole queue.
+async fn persist(j: &mut Job, root: &std::path::Path) -> bool {
+    match j.save(root).await {
+        Ok(()) => true,
+        Err(e) => {
+            j.state = State::Failed;
+            j.error = Some(format!("无法保存传输状态：{e:#}"));
+            false
+        }
+    }
 }
 fn relevant_proxies(route: &[Connection], proxies: &[Proxy]) -> Vec<Proxy> {
     proxies
