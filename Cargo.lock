@@ -4960,7 +4960,7 @@ dependencies = [
 
 [[package]]
 name = "nutty"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4994,7 +4994,7 @@ dependencies = [
 
 [[package]]
 name = "nutty-ai"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -5021,7 +5021,7 @@ dependencies = [
 
 [[package]]
 name = "nutty-core"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "aes-gcm",
  "alacritty_terminal",
@@ -5052,7 +5052,7 @@ dependencies = [
 
 [[package]]
 name = "nutty-ssh"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5078,7 +5078,7 @@ dependencies = [
 
 [[package]]
 name = "nutty-terminal"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "alacritty_terminal",
  "anyhow",

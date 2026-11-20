@@ -1,6 +1,6 @@
 # 构建与发布
 
-应用版本的唯一来源是根 `Cargo.toml` 的 `[workspace.package].version`，当前为 **1.0.0-beta.1**。工作区 crate 继承该版本，根 `Cargo.toml` 中内部 crate 的 `version` 要求需同步修改。Windows PE 资源由 Cargo 生成：字符串版本为完整版本，数字版本为 `1.0.0.0`。macOS 要求包版本只含数字，`Info.plist` 的两个版本字段填写数字部分（当前为 `1.0.0`），`Nutty --version` 显示完整版本。构建脚本和 `scripts/check-version.py` 均会检查一致性。
+应用版本的唯一来源是根 `Cargo.toml` 的 `[workspace.package].version`，当前为 **1.0.0-beta.2**。工作区 crate 继承该版本，根 `Cargo.toml` 中内部 crate 的 `version` 要求需同步修改。Windows PE 资源由 Cargo 生成：字符串版本为完整版本，数字版本为 `1.0.0.0`。macOS 要求包版本只含数字，`Info.plist` 的两个版本字段填写数字部分（当前为 `1.0.0`），`Nutty --version` 显示完整版本。构建脚本和 `scripts/check-version.py` 均会检查一致性。
 
 版本号带预发布后缀（如 `-beta.1`）时，对应 tag 必然含 `-`，发布工作流只会创建 Pre-release，不会产生正式版本。
 
@@ -12,11 +12,11 @@
 
 ```sh
 # 当前 Beta：tag 与版本一致，发布为预发布。
-git tag -a v1.0.0-beta.1 -m "Nutty 1.0.0-beta.1"
-git push origin v1.0.0-beta.1
+git tag -a v1.0.0-beta.2 -m "Nutty 1.0.0-beta.2"
+git push origin v1.0.0-beta.2
 
-# 同一版本的打包试验：应用内仍显示 1.0.0-beta.1。
-git tag -a v1.0.0-beta.1-test.1 -m "Nutty 1.0.0-beta.1 packaging trial"
+# 同一版本的打包试验：应用内仍显示 1.0.0-beta.2。
+git tag -a v1.0.0-beta.2-test.1 -m "Nutty 1.0.0-beta.2 packaging trial"
 ```
 
 打 tag 前先在 `CHANGELOG.md` 写好与版本号同名的章节（`## [1.0.0-beta.1]`）。`scripts/check-version.py` 在构建前检查它是否存在，发布工作流用 `scripts/release-notes.py` 把这一章节和下载、首次打开说明组成 GitHub Release 说明。
