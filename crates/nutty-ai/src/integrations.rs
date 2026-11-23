@@ -140,6 +140,21 @@ impl Runtime {
         );
         peer.prompt(prompt, cancel, progress).await
     }
+    /// Asks the pane's running Agent a question from the application itself, inside the
+    /// Agent's current session. It never starts an Agent. Dropping the returned future
+    /// abandons the answer without cancelling the Agent's turn, because a cancelled
+    /// prompt ends the whole Agent session.
+    pub async fn agent_side_prompt(&self, agent: Uuid, prompt: String) -> Result<String> {
+        let peer = self
+            .agents
+            .lock()
+            .await
+            .get(&agent)
+            .filter(|peer| !peer.is_closed())
+            .cloned()
+            .context("ACP 会话已结束")?;
+        peer.prompt(prompt, CancellationToken::new(), None).await
+    }
     pub async fn configure_agent(
         &self,
         agent: Uuid,

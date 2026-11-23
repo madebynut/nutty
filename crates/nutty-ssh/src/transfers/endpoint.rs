@@ -6,7 +6,7 @@ use futures_util::{
 };
 use russh_sftp::{
     client::{RawSftpSession, error::Error},
-    protocol::{FileAttributes, OpenFlags, Packet, StatusCode},
+    protocol::{FileAttributes, OpenFlags, Packet, SftpHandle, StatusCode},
 };
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
@@ -105,14 +105,14 @@ pub(super) enum File {
     Local(tokio::fs::File),
     Remote {
         session: Arc<RawSftpSession>,
-        handle: String,
+        handle: SftpHandle,
     },
 }
 pub(super) enum Directory {
     Local(Box<tokio::fs::ReadDir>),
     Remote {
         session: Arc<RawSftpSession>,
-        handle: String,
+        handle: SftpHandle,
         page: std::collections::VecDeque<String>,
         empty: u8,
     },
@@ -120,7 +120,7 @@ pub(super) enum Directory {
 impl Drop for File {
     fn drop(&mut self) {
         if let Self::Remote { session, handle } = self
-            && !handle.is_empty()
+            && !handle.as_bytes().is_empty()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
             let s = session.clone();
@@ -136,7 +136,7 @@ impl Drop for Directory {
         if let Self::Remote {
             session, handle, ..
         } = self
-            && !handle.is_empty()
+            && !handle.as_bytes().is_empty()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
             let s = session.clone();
@@ -240,7 +240,7 @@ fn timed<T: Send + 'static>(
 }
 async fn read_at(
     session: Arc<RawSftpSession>,
-    handle: String,
+    handle: SftpHandle,
     offset: u64,
     len: usize,
 ) -> Result<Vec<u8>> {

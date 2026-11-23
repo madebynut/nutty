@@ -26,7 +26,7 @@ use super::{
 use crate::{
     ai,
     assistant_session::{CommandState, Mode, Session},
-    command,
+    command, command_review,
     provider::{Provider, Reasoning, Selection},
 };
 
@@ -748,7 +748,7 @@ impl WorkspaceView {
                     for (index, label, checked, icon) in [
                         (
                             0,
-                            "自动发送白名单只读命令",
+                            "自动发送只读命令（由模型判定）",
                             read_only,
                             IconName::ShieldCheck,
                         ),
@@ -768,6 +768,9 @@ impl WorkspaceView {
                                             let session = &mut pane.assistant.session;
                                             if index == 0 {
                                                 session.auto_read_only = !session.auto_read_only;
+                                                if !session.auto_read_only {
+                                                    session.cancel_review();
+                                                }
                                             } else {
                                                 session.capture_output = !session.capture_output;
                                                 if !session.capture_output {
@@ -951,9 +954,6 @@ impl WorkspaceView {
         }
         let ready =
             engine.automatic_command_ready(generation) && (pane.node.is_some() || !cfg!(windows));
-        let Some(entry) = pane.assistant.session.entries.last_mut() else {
-            return;
-        };
         let state = if ready {
             crate::assistant_session::AutomationState::Ready
         } else if !engine.shell_integration_active() {
@@ -961,23 +961,82 @@ impl WorkspaceView {
         } else {
             crate::assistant_session::AutomationState::TerminalChanged
         };
-        let dispatch = entry.prepare_automatic(&engine.environment(), state);
-        if !dispatch.is_empty() {
-            let commands = dispatch
-                .iter()
-                .map(|(_, command)| command.as_str())
-                .collect::<Vec<_>>()
-                .join("; ");
-            let result = engine.send_automatic_command(&commands, generation);
-            for (id, _) in dispatch {
-                if let Some(command) = pane.assistant.session.command_mut(id) {
-                    command.state = match &result {
-                        Ok(()) => CommandState::Sent,
-                        Err(error) => CommandState::Deferred(error.to_string()),
-                    };
-                }
+        let environment = engine.environment();
+        // The model that answered also judges, in a separate request, which of its
+        // commands only read state. They are sent when its verdicts arrive.
+        let Some(review) = pane
+            .assistant
+            .session
+            .begin_review(&environment, state, generation)
+        else {
+            return;
+        };
+        let runtime = pane.assistant.session.runtime.clone();
+        let agent = match pane.assistant.provider.read(cx).selected_value() {
+            Some(AssistantChoice::Agent(agent)) => Some(*agent),
+            _ => None,
+        };
+        let reviewer = match agent {
+            Some(agent) => Ok(command_review::Reviewer::Agent(agent)),
+            None => self
+                .pane_selection(id, cx)
+                .map(|selection| command_review::Reviewer::Provider(Box::new(selection))),
+        };
+        let reviewer = match reviewer {
+            Ok(reviewer) => reviewer,
+            Err(error) => {
+                self.receive_command_review(id, session, review.id, Err(error), cx);
+                return;
             }
-        }
+        };
+        let events = self.events.clone();
+        self.launch(async move {
+            let result = command_review::review(command_review::Request {
+                reviewer,
+                commands: review.commands,
+                environment,
+                runtime,
+                cancel: review.cancel,
+            })
+            .await;
+            let _ = events
+                .send(BackendEvent::CommandReview {
+                    pane: id,
+                    session,
+                    review: review.id,
+                    result,
+                })
+                .await;
+        });
+    }
+
+    pub(super) fn receive_command_review(
+        &mut self,
+        id: Uuid,
+        session: Uuid,
+        review: Uuid,
+        result: Result<Vec<command_review::Verdict>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.panes.get_mut(&id) else {
+            return;
+        };
+        let engine = &pane.view.read(cx).terminal.engine;
+        // Each command is a block of its own, so they are submitted as separate lines.
+        // PowerShell has no multi-line submission here and takes them as one line.
+        let separator = if engine.environment().supports_powershell_commands() {
+            "; "
+        } else {
+            "\n"
+        };
+        // The terminal checks again, at submission, that nothing happened in it since
+        // the question was asked and that it still shows an empty prompt.
+        pane.assistant
+            .session
+            .finish_review(session, review, result, |revision, commands| {
+                engine.send_automatic_command(&commands.join(separator), revision)
+            });
+        cx.notify();
     }
 
     fn execute_proposal(
@@ -1717,6 +1776,8 @@ impl WorkspaceView {
                     ))
                 } else if let CommandState::Deferred(reason) = &proposal.state {
                     Some(reason.as_str())
+                } else if proposal.state == CommandState::Reviewing {
+                    Some(crate::i18n::text("只读校验中…"))
                 } else {
                     None
                 };

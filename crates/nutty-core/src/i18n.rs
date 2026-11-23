@@ -16,6 +16,13 @@ pub fn set_language(language: Language) {
         Ordering::Relaxed,
     );
 }
+pub fn language() -> Language {
+    if LANGUAGE.load(Ordering::Relaxed) == 0 {
+        Language::Chinese
+    } else {
+        Language::English
+    }
+}
 struct Dictionary {
     exact: std::collections::HashMap<&'static str, &'static str>,
     formats: Vec<(&'static str, &'static str)>,

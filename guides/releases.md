@@ -1,6 +1,6 @@
 # 构建与发布
 
-应用版本的唯一来源是根 `Cargo.toml` 的 `[workspace.package].version`，当前为 **1.0.0-beta.2**。工作区 crate 继承该版本，根 `Cargo.toml` 中内部 crate 的 `version` 要求需同步修改。Windows PE 资源由 Cargo 生成：字符串版本为完整版本，数字版本为 `1.0.0.0`。macOS 要求包版本只含数字，`Info.plist` 的两个版本字段填写数字部分（当前为 `1.0.0`），`Nutty --version` 显示完整版本。构建脚本和 `scripts/check-version.py` 均会检查一致性。
+应用版本的唯一来源是根 `Cargo.toml` 的 `[workspace.package].version`，当前为 **1.0.0-beta.3**。工作区 crate 继承该版本，根 `Cargo.toml` 中内部 crate 的 `version` 要求需同步修改。Windows PE 资源由 Cargo 生成：字符串版本为完整版本，数字版本为 `1.0.0.0`。macOS 要求包版本只含数字，`Info.plist` 的两个版本字段填写数字部分（当前为 `1.0.0`），`Nutty --version` 显示完整版本。构建脚本和 `scripts/check-version.py` 均会检查一致性。
 
 版本号带预发布后缀（如 `-beta.1`）时，对应 tag 必然含 `-`，发布工作流只会创建 Pre-release，不会产生正式版本。
 
@@ -12,11 +12,11 @@
 
 ```sh
 # 当前 Beta：tag 与版本一致，发布为预发布。
-git tag -a v1.0.0-beta.2 -m "Nutty 1.0.0-beta.2"
-git push origin v1.0.0-beta.2
+git tag -a v1.0.0-beta.3 -m "Nutty 1.0.0-beta.3"
+git push origin v1.0.0-beta.3
 
-# 同一版本的打包试验：应用内仍显示 1.0.0-beta.2。
-git tag -a v1.0.0-beta.2-test.1 -m "Nutty 1.0.0-beta.2 packaging trial"
+# 同一版本的打包试验：应用内仍显示 1.0.0-beta.3。
+git tag -a v1.0.0-beta.3-test.1 -m "Nutty 1.0.0-beta.3 packaging trial"
 ```
 
 打 tag 前先在 `CHANGELOG.md` 写好与版本号同名的章节（`## [1.0.0-beta.1]`）。`scripts/check-version.py` 在构建前检查它是否存在，发布工作流用 `scripts/release-notes.py` 把这一章节和下载、首次打开说明组成 GitHub Release 说明。
@@ -41,7 +41,7 @@ git tag -a v1.0.0-beta.2-test.1 -m "Nutty 1.0.0-beta.2 packaging trial"
 
 依赖策略在根目录 `deny.toml`，覆盖五个发货平台，检查安全公告、许可证、禁用项和依赖来源。CI 在每次推送和拉取请求时运行 `cargo deny --workspace --all-features check`；发布工作流运行同一检查，预发布遇到问题只警告，正式 tag 遇到任何未通过项会停止发布。完整报告见 `dependency-advisories` 附件。
 
-- **安全公告：** 漏洞、unsound、已撤回（yanked）的依赖一律失败。停止维护的依赖默认失败，只有 `deny.toml` 中逐条写明理由和移除条件的才豁免，目前 8 条，均为 GPUI/gpui-kit、zbus、rmcp 和 russh-sftp 的间接依赖，没有已知漏洞。
+- **安全公告：** 漏洞、unsound、已撤回（yanked）的依赖一律失败。停止维护的依赖默认失败，只有 `deny.toml` 中逐条写明理由和移除条件的才豁免，目前 8 条，均为 GPUI/gpui-kit、zbus 和 rmcp 的间接依赖，没有已知漏洞。
 - **许可证：** 只允许与 Apache-2.0 分发兼容的宽松许可证；MPL-2.0 仅对 `option-ext`、`dwrote`、`cbindgen` 三个未修改的依赖例外。
 - **来源：** 只允许 crates.io，不接受任何 git 依赖。
 

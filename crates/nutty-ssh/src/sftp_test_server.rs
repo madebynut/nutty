@@ -2,8 +2,8 @@
 
 use russh_sftp::{
     protocol::{
-        Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Packet, Status, StatusCode,
-        Version,
+        Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Packet, SftpHandle, Status,
+        StatusCode, Version,
     },
     server::Handler,
 };
@@ -83,6 +83,10 @@ fn path(name: &str) -> String {
         .collect::<Vec<_>>()
         .join("/")
 }
+/// Handles are the names they were opened with.
+fn name(handle: SftpHandle) -> Result<String, StatusCode> {
+    String::from_utf8(handle.into_bytes()).map_err(|_| StatusCode::Failure)
+}
 fn ok(id: u32) -> Status {
     Status {
         id,
@@ -133,19 +137,20 @@ impl Handler for Sftp {
         }
         Ok(Handle {
             id,
-            handle: filename,
+            handle: filename.into(),
         })
     }
-    async fn close(&mut self, id: u32, _: String) -> Result<Status, StatusCode> {
+    async fn close(&mut self, id: u32, _: SftpHandle) -> Result<Status, StatusCode> {
         Ok(ok(id))
     }
     async fn read(
         &mut self,
         id: u32,
-        handle: String,
+        handle: SftpHandle,
         offset: u64,
         len: u32,
     ) -> Result<Data, StatusCode> {
+        let handle = name(handle)?;
         if self
             .files
             .3
@@ -184,10 +189,11 @@ impl Handler for Sftp {
     async fn write(
         &mut self,
         id: u32,
-        handle: String,
+        handle: SftpHandle,
         offset: u64,
         data: Vec<u8>,
     ) -> Result<Status, StatusCode> {
+        let handle = name(handle)?;
         let mut files = self.files.0.lock().await;
         let bytes = files.get_mut(&handle).ok_or(StatusCode::NoSuchFile)?;
         let start = usize::try_from(offset).map_err(|_| StatusCode::Failure)?;
@@ -271,12 +277,14 @@ impl Handler for Sftp {
     async fn fsetstat(
         &mut self,
         id: u32,
-        handle: String,
+        handle: SftpHandle,
         attributes: FileAttributes,
     ) -> Result<Status, StatusCode> {
+        let handle = name(handle)?;
         self.setstat(id, handle, attributes).await
     }
-    async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, StatusCode> {
+    async fn fstat(&mut self, id: u32, handle: SftpHandle) -> Result<Attrs, StatusCode> {
+        let handle = name(handle)?;
         self.stat(id, handle).await
     }
     async fn lstat(&mut self, id: u32, filename: String) -> Result<Attrs, StatusCode> {
@@ -291,10 +299,11 @@ impl Handler for Sftp {
         self.directories.remove(&directory);
         Ok(Handle {
             id,
-            handle: directory,
+            handle: directory.into(),
         })
     }
-    async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, StatusCode> {
+    async fn readdir(&mut self, id: u32, handle: SftpHandle) -> Result<Name, StatusCode> {
+        let handle = name(handle)?;
         if !self.directories.insert(handle.clone()) {
             return Err(StatusCode::Eof);
         }

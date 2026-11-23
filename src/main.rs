@@ -12,7 +12,7 @@ mod terminal_view;
 #[cfg(target_os = "macos")]
 mod traffic_lights;
 
-use nutty_ai::{acp, ai, assistant_session, integrations, provider_catalog};
+use nutty_ai::{acp, ai, assistant_session, command_review, integrations, provider_catalog};
 use nutty_core::{
     agent_discovery, command, config, i18n, network, portable, provider, shells, ssh_options,
     theme, update, workspace,

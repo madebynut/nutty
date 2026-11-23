@@ -16,7 +16,7 @@ dirs.workspace = true
 getrandom.workspace = true
 keyring.workspace = true
 # The same crate keyring builds on; Entry and Error types are shared with it.
-keyring-core = "1.0.1"
+keyring-core = "1.1.0"
 reqwest.workspace = true
 russh.workspace = true
 semver.workspace = true

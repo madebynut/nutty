@@ -20,9 +20,9 @@ unmaintained = "all"
 ignore = [
     # All seven are transitive and have no known vulnerability. None parses
     # remote-controlled data except font tables from locally installed fonts.
-    # Upstream releases checked on 2026-11-12: gpui-kit 0.9.1 and gpui-pre 0.3.12 are
-    # the newest, and the zbus 6 migration has not reached keyring's Secret Service
-    # store, accesskit or ashpd.
+    # Upstream releases checked on 2026-11-22: gpui-kit 0.10.0 is the newest and still
+    # builds on gpui-pre 0.3.12, and the zbus 6 migration has not reached keyring's
+    # Secret Service store, accesskit or ashpd.
     { id = "RUSTSEC-2024-0384", reason = "instant: timing shim used by gpui-base/gpui-component; no I/O. Removed when gpui-kit moves to web-time." },
     { id = "RUSTSEC-2024-0436", reason = "paste: compile-time macro in gpui-component; not present at runtime. Removed when gpui-kit moves to pastey." },
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz: text shaping in GPUI and resvg for local fonts and bundled SVG icons only. Removed when GPUI moves to harfrust." },
@@ -30,7 +30,7 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant: merged into zbus 6, not abandoned; used by the Linux Secret Service store, AT-SPI accessibility and portals. Removed when keyring, accesskit and ashpd adopt zbus 6." },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names: merged into zbus 6, not abandoned; same dependents as zvariant." },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: merged into zbus 6, not abandoned; compile-time derive for the same dependents." },
-    { id = "RUSTSEC-2026-0543", reason = "chrono: unmaintained, no known vulnerability; timestamps in GPUI, gpui-component, rmcp and russh-sftp. Removed when they move to jiff or time." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: unmaintained, no known vulnerability; timestamps in GPUI, gpui-component and rmcp. Removed when they move to jiff or time." },
 ]
 
 [licenses]

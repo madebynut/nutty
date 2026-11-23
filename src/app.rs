@@ -295,6 +295,12 @@ enum BackendEvent {
         tool: Uuid,
         result: Result<String>,
     },
+    CommandReview {
+        pane: Uuid,
+        session: Uuid,
+        review: Uuid,
+        result: Result<Vec<crate::command_review::Verdict>>,
+    },
     ConfigurationSaved {
         id: Uuid,
         result: Result<crate::config::Profile>,
@@ -1862,6 +1868,12 @@ impl WorkspaceView {
                 request,
                 result,
             } => self.receive_ai(pane, session, request, result, cx),
+            BackendEvent::CommandReview {
+                pane,
+                session,
+                review,
+                result,
+            } => self.receive_command_review(pane, session, review, result, cx),
             BackendEvent::Forward {
                 rule,
                 request,
@@ -3883,33 +3895,18 @@ impl Render for WorkspaceView {
                             .children(self.update.as_ref().map(|release| {
                                 let url = release.url.clone();
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .id("status-update")
-                                            .cursor_pointer()
-                                            .text_color(rgb(p.accent))
-                                            .child(crate::i18n::localize(format!(
-                                                "新版本 {} 可用",
-                                                release.version
-                                            )))
-                                            .on_click(move |_, _, cx| cx.open_url(&url)),
-                                    )
-                                    .child(
-                                        icon_button(
-                                            "status-dismiss-update",
-                                            IconName::X,
-                                            crate::i18n::text("本次不再提示"),
-                                        )
-                                        .on_click(
-                                            cx.listener(|view, _, _, cx| {
-                                                view.update = None;
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    )
+                                    .id("status-update")
+                                    .cursor_pointer()
+                                    .text_color(rgb(p.accent))
+                                    .child(crate::i18n::localize(format!(
+                                        "新版本 {} 可用",
+                                        release.version
+                                    )))
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        cx.open_url(&url);
+                                        view.update = None;
+                                        cx.notify();
+                                    }))
                             }))
                             .child(crate::i18n::localize(format!(
                                 "{} 会话   ·   UTF-8",

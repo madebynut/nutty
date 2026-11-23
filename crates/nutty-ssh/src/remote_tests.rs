@@ -2155,11 +2155,8 @@ async fn native_remote_shells_capture_typed_history_and_allow_safe_automation() 
                 );
             }
             let revision = wait_for_integrated_prompt(&terminal).await?;
-            let command = nutty_core::command::automatic_read_only(
-                "uname -srm; printf 'shell=%s\\n' \"$0\"; pwd; ls -la | head -n 40",
-            )
-            .context("read-only command")?;
-            terminal.engine.send_automatic_command(&command, revision)?;
+            let command = "uname -srm; printf 'shell=%s\\n' \"$0\"; pwd; ls -la | head -n 40";
+            terminal.engine.send_automatic_command(command, revision)?;
             wait_for_integrated_prompt(&terminal)
                 .await
                 .with_context(|| format!("{shell}/{route} automatic"))?;

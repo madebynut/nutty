@@ -193,7 +193,7 @@ Streamable HTTP 地址	Streamable HTTP endpoint
 网络中断后自动重连	Reconnect after network interruption
 网络代理	Network proxies
 网络代理 · 直连时使用	Network proxy · For direct connections
-自动发送白名单只读命令	Automatically send allowlisted read-only commands
+自动发送只读命令（由模型判定）	Automatically send read-only commands (judged by the model)
 草稿随会话保留 · 支持多行	Draft stays with this pane · Supports multiple lines
 表达式无效	Invalid expression
 视图	View
@@ -932,13 +932,23 @@ SFTP 连续返回空目录页	The SFTP server repeatedly returned empty director
 服务器未报告文件大小，拒绝传输	The server did not report the file size; transfer was refused
 等待远端 Shell 集成：请在终端按 Enter 返回空提示符	Waiting for remote shell integration: press Enter in the terminal to return to an empty prompt
 只读自动发送：等待 Shell	Read-only auto-send: waiting for shell
-包含未支持的展开或脚本结构，请手动执行	Unsupported expansion or script syntax; run manually
-{} 可能等待终端输入，请指定文件或管道	{} may wait for terminal input; specify a file or pipe
-{} 的命令或参数尚未通过自动只读校验	{} or its arguments have not passed the automatic read-only check
-{} 不适用于 {}，已阻止自动发送	{} is not available on {}; automatic send blocked
+只读校验中…	Checking that it only reads…
+模型判定需手动确认：{}	Kept manual by the model: {}
+模型判定需手动确认	Kept manual by the model
+模型没有给出明确判定	The model gave no clear verdict
+只读校验未完成，请点击执行：{}	The read-only check did not finish; click to run: {}
+只读校验已取消，请点击执行	Read-only check cancelled; click to run
+只读校验已取消	Read-only check cancelled
+只读校验超时	The read-only check timed out
+模型没有返回可识别的只读判定	The model did not return a readable read-only verdict
+只读校验的回复过长	The read-only check reply is too long
+只读校验的命令数量无效	Invalid number of commands for the read-only check
+命令过长，无法进行只读校验	Commands are too long for the read-only check
+命令过长，无法自动校验，请点击执行	Command too long for the automatic check; click to run
+本次回复的命令过多，其余请点击执行	Too many commands in this reply; click to run the rest
+此终端未启用括号粘贴，无法自动发送多行或含制表符的命令，请点击执行	Bracketed paste is off in this terminal, so multi-line commands and commands with tabs cannot be sent automatically; click to run
 命令语言与当前终端 Shell 不匹配，已阻止发送	Command language does not match the current terminal shell; sending blocked
 当前 Shell 暂不支持只读自动发送	Read-only auto-send is not supported by the current shell
-当前 Shell 不支持 $0，请手动调整命令	The current shell does not support $0; adjust the command manually
 每次最多自动发送 3 条命令，其余请手动执行	Auto-send is limited to 3 commands per reply; run the rest manually
 恢复工作区	Restore workspace
 启动时恢复标签、分屏和本地目录；SSH 会话手动重连	Restore tabs, splits and local directories on launch; reconnect SSH manually
@@ -1002,7 +1012,6 @@ OSC 52 写入，常见于远端 tmux、vim；读取剪贴板始终询问	OSC 52 
 此 API 地址使用 http 且不在本机：对话内容和 API 密钥都会明文传输，可能被网络中的设备截获。请尽量改用 https。	This API address uses http and is not on this computer: conversations and the API key are sent unencrypted and can be intercepted on the network. Use https where possible.
 此地址使用 http 且不在本机：工具调用内容和 Bearer Token 都会明文传输，可能被网络中的设备截获。请尽量改用 https。	This address uses http and is not on this computer: tool calls and the bearer token are sent unencrypted and can be intercepted on the network. Use https where possible.
 新版本 {} 可用	Nutty {} is available
-本次不再提示	Hide until next launch
 查看新版本 {}	View Nutty {}
 检查新版本	Check for updates
 启动时向 GitHub 查询一次是否有新版本，不发送任何个人信息	Ask GitHub once at startup whether a newer release exists. No personal information is sent

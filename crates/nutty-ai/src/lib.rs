@@ -7,5 +7,6 @@ use nutty_core::{command, config, i18n, network, provider, session_environment};
 pub mod acp;
 pub mod ai;
 pub mod assistant_session;
+pub mod command_review;
 pub mod integrations;
 pub mod provider_catalog;

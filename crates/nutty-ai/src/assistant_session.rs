@@ -1,6 +1,10 @@
 //! Pane-owned AI conversations with cancellation, stale-response rejection and command state.
 
-use crate::ai::{Reply, Turn};
+use crate::{
+    ai::{Reply, Turn},
+    command_review::{self, Verdict},
+    i18n,
+};
 #[cfg(test)]
 use anyhow::Context as _;
 use anyhow::{Result, ensure};
@@ -17,6 +21,8 @@ pub enum Mode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandState {
     Suggested,
+    /// Waiting for the model's read-only verdict. A click still sends it at once.
+    Reviewing,
     Sent,
     Deferred(String),
 }
@@ -59,67 +65,22 @@ pub enum AutomationState {
     TerminalChanged,
 }
 
-impl Entry {
-    pub fn prepare_automatic(
-        &mut self,
-        environment: &crate::session_environment::Environment,
-        state: AutomationState,
-    ) -> Vec<(Uuid, String)> {
-        let mut dispatch = Vec::new();
-        for proposed in &mut self.commands {
-            if proposed.state == CommandState::Sent {
-                continue;
-            }
-            let result = (|| -> Result<String> {
-                ensure!(
-                    proposed.language.as_deref().is_none_or(|language| {
-                        crate::command::language_supported(language, environment)
-                    }),
-                    "命令语言与当前终端 Shell 不匹配，已阻止发送"
-                );
-                ensure!(
-                    environment.supports_posix_commands()
-                        || environment.supports_powershell_commands(),
-                    "当前 Shell 暂不支持只读自动发送"
-                );
-                let command = if environment.supports_powershell_commands() {
-                    crate::command::prepare_powershell_read_only(&proposed.text)?
-                } else {
-                    crate::command::prepare_read_only_for(
-                        &proposed.text,
-                        environment.operating_system,
-                    )?
-                };
-                ensure!(
-                    environment.supports_powershell_commands()
-                        || !(environment.shell_is("fish") && command.contains("\"$0\"")),
-                    "当前 Shell 不支持 $0，请手动调整命令"
-                );
-                match state {
-                    AutomationState::Ready => {}
-                    AutomationState::ShellUnavailable => {
-                        anyhow::bail!("等待远端 Shell 集成：请在终端按 Enter 返回空提示符")
-                    }
-                    AutomationState::TerminalChanged => {
-                        anyhow::bail!("终端状态已变化，或无法确认空闲提示符，请手动执行")
-                    }
-                }
-                ensure!(
-                    dispatch.len() < 3,
-                    "每次最多自动发送 3 条命令，其余请手动执行"
-                );
-                Ok(command)
-            })();
-            match result {
-                Ok(command) => dispatch.push((proposed.id, command)),
-                Err(error) => {
-                    proposed.state =
-                        CommandState::Deferred(crate::i18n::localize(error.to_string()))
-                }
-            }
-        }
-        dispatch
-    }
+/// Commands sent without a click after one reply.
+pub const MAX_AUTOMATIC_COMMANDS: usize = 3;
+
+/// A read-only review the application has to run: `commands` go to the model, and its
+/// verdicts come back through [`Session::finish_review`] under the same `id`.
+pub struct Review {
+    pub id: Uuid,
+    pub cancel: CancellationToken,
+    pub commands: Vec<String>,
+}
+
+struct ReviewPending {
+    id: Uuid,
+    cancel: CancellationToken,
+    terminal_revision: u64,
+    commands: Vec<Uuid>,
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +109,7 @@ pub struct Session {
     pub needs_agent_login: bool,
     pub needs_credentials: bool,
     tool_pending: Option<(Uuid, CancellationToken)>,
+    review: Option<ReviewPending>,
     continuations: u8,
     pub runtime: std::sync::Arc<crate::integrations::Runtime>,
 }
@@ -171,6 +133,7 @@ impl Session {
             needs_agent_login: false,
             needs_credentials: false,
             tool_pending: None,
+            review: None,
             continuations: 0,
             runtime: std::sync::Arc::new(crate::integrations::Runtime::new()),
         }
@@ -197,6 +160,8 @@ impl Session {
                     <= 256 * 1024,
             "对话过长，请新建会话"
         );
+        // A new question means the user has moved on from the last reply.
+        self.cancel_review();
         self.error = None;
         self.needs_agent_login = false;
         self.needs_credentials = false;
@@ -294,7 +259,195 @@ impl Session {
         }
         Some(pending.terminal_revision)
     }
+    /// Starts the read-only review of the newest reply's commands. Everything that can
+    /// be decided without the model is decided here: a command in another shell's
+    /// language, a terminal that is not at an idle prompt and oversized commands stay
+    /// manual and are never sent to the model. `terminal_revision` is the terminal
+    /// state the question was asked in; the commands are sent only if it still holds.
+    pub fn begin_review(
+        &mut self,
+        environment: &crate::session_environment::Environment,
+        state: AutomationState,
+        terminal_revision: u64,
+    ) -> Option<Review> {
+        self.cancel_review();
+        if self.ended || self.pending.is_some() {
+            return None;
+        }
+        let entry = self.entries.last_mut()?;
+        let mut ids = Vec::new();
+        let mut commands = Vec::new();
+        let mut bytes = 0;
+        for proposed in &mut entry.commands {
+            if proposed.state != CommandState::Suggested {
+                continue;
+            }
+            let result = (|| -> Result<()> {
+                ensure!(
+                    proposed.language.as_deref().is_none_or(|language| {
+                        crate::command::language_supported(language, environment)
+                    }),
+                    "命令语言与当前终端 Shell 不匹配，已阻止发送"
+                );
+                ensure!(
+                    environment.supports_posix_commands()
+                        || environment.supports_powershell_commands(),
+                    "当前 Shell 暂不支持只读自动发送"
+                );
+                match state {
+                    AutomationState::Ready => {}
+                    AutomationState::ShellUnavailable => {
+                        anyhow::bail!("等待远端 Shell 集成：请在终端按 Enter 返回空提示符")
+                    }
+                    AutomationState::TerminalChanged => {
+                        anyhow::bail!("终端状态已变化，或无法确认空闲提示符，请手动执行")
+                    }
+                }
+                ensure!(
+                    proposed.text.len() <= command_review::MAX_COMMAND_BYTES,
+                    "命令过长，无法自动校验，请点击执行"
+                );
+                ensure!(
+                    commands.len() < command_review::MAX_COMMANDS
+                        && bytes + proposed.text.len() <= command_review::MAX_REVIEW_BYTES,
+                    "本次回复的命令过多，其余请点击执行"
+                );
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    bytes += proposed.text.len();
+                    proposed.state = CommandState::Reviewing;
+                    ids.push(proposed.id);
+                    commands.push(proposed.text.clone());
+                }
+                Err(error) => {
+                    proposed.state = CommandState::Deferred(i18n::localize(error.to_string()))
+                }
+            }
+        }
+        if commands.is_empty() {
+            return None;
+        }
+        let id = Uuid::new_v4();
+        let cancel = CancellationToken::new();
+        self.review = Some(ReviewPending {
+            id,
+            cancel: cancel.clone(),
+            terminal_revision,
+            commands: ids,
+        });
+        Some(Review {
+            id,
+            cancel,
+            commands,
+        })
+    }
+    /// Applies the model's verdicts. Allowed commands, at most
+    /// [`MAX_AUTOMATIC_COMMANDS`], are handed to `send` in reply order together with the
+    /// terminal revision of the question; everything else waits for a click with the
+    /// reason shown. A command the user sent or that changed meanwhile is left alone.
+    /// Returns whether the verdicts belonged to the current review.
+    pub fn finish_review(
+        &mut self,
+        session: Uuid,
+        review: Uuid,
+        verdicts: Result<Vec<Verdict>>,
+        send: impl FnOnce(u64, &[&str]) -> Result<()>,
+    ) -> bool {
+        if self.ended
+            || self.id != session
+            || self
+                .review
+                .as_ref()
+                .is_none_or(|pending| pending.id != review || pending.cancel.is_cancelled())
+        {
+            return false;
+        }
+        let Some(pending) = self.review.take() else {
+            return false;
+        };
+        let verdicts = verdicts.and_then(|verdicts| {
+            ensure!(
+                verdicts.len() == pending.commands.len(),
+                "模型没有返回可识别的只读判定"
+            );
+            Ok(verdicts)
+        });
+        let verdicts = match verdicts {
+            Ok(verdicts) => verdicts,
+            Err(error) => {
+                let detail: String = format!("{error:#}").chars().take(240).collect();
+                let reason = i18n::text("只读校验未完成，请点击执行：{}").replacen(
+                    "{}",
+                    &i18n::localize(detail),
+                    1,
+                );
+                self.defer_reviewing(&pending.commands, &reason);
+                return true;
+            }
+        };
+        let mut allowed = Vec::new();
+        for (id, verdict) in pending.commands.iter().zip(verdicts) {
+            let Some(command) = self
+                .command_mut(*id)
+                .filter(|command| command.state == CommandState::Reviewing)
+            else {
+                continue;
+            };
+            if !verdict.allow {
+                command.state = CommandState::Deferred(if verdict.reason.is_empty() {
+                    i18n::text("模型判定需手动确认").into()
+                } else {
+                    i18n::text("模型判定需手动确认：{}").replacen("{}", &verdict.reason, 1)
+                });
+            } else if allowed.len() == MAX_AUTOMATIC_COMMANDS {
+                command.state = CommandState::Deferred(
+                    i18n::text("每次最多自动发送 3 条命令，其余请手动执行").into(),
+                );
+            } else {
+                allowed.push((*id, command.text.clone()));
+            }
+        }
+        if allowed.is_empty() {
+            return true;
+        }
+        let texts: Vec<&str> = allowed.iter().map(|(_, text)| text.as_str()).collect();
+        let state = match send(pending.terminal_revision, &texts) {
+            Ok(()) => CommandState::Sent,
+            Err(error) => CommandState::Deferred(i18n::localize(error.to_string())),
+        };
+        for (id, _) in &allowed {
+            if let Some(command) = self.command_mut(*id) {
+                command.state = state.clone();
+            }
+        }
+        true
+    }
+    /// Abandons a running review; its commands wait for a click and a late verdict is
+    /// ignored.
+    pub fn cancel_review(&mut self) {
+        if let Some(pending) = self.review.take() {
+            pending.cancel.cancel();
+            let reason = i18n::text("只读校验已取消，请点击执行");
+            self.defer_reviewing(&pending.commands, reason);
+        }
+    }
+    pub fn reviewing(&self) -> bool {
+        self.review.is_some()
+    }
+    fn defer_reviewing(&mut self, commands: &[Uuid], reason: &str) {
+        for id in commands {
+            if let Some(command) = self
+                .command_mut(*id)
+                .filter(|command| command.state == CommandState::Reviewing)
+            {
+                command.state = CommandState::Deferred(reason.into());
+            }
+        }
+    }
     pub fn stop(&mut self) {
+        self.cancel_review();
         if let Some(pending) = self.pending.take() {
             pending.cancel.cancel();
             if !pending.partial.is_empty() {
@@ -475,52 +628,23 @@ impl Drop for Session {
 mod tests {
     use super::*;
 
-    #[test]
-    fn automatic_replies_check_language_terminal_state_and_limits_before_dispatch() -> Result<()> {
-        let environment = crate::session_environment::Environment::from_current_shell_probe(
+    fn linux() -> Result<crate::session_environment::Environment> {
+        crate::session_environment::Environment::from_current_shell_probe(
             b"NUTTY_ENV_V1\nbash\nLinux\n6.8.0\nx86_64\n",
         )
-        .context("Linux target")?;
-        let diagnostic = "uname -srm; printf 'shell=%s\\n' \"$0\"; pwd; ls -la | head -n 40";
-        let text = format!(
-            "```bash\n{diagnostic}\n```\n```powershell\npwd\n```\n```sh\ncat\n```\n```sh\nrm file\n```\n```sh\nuname -s\n```\n```sh\nwhoami\n```\n```sh\nid\n```"
-        );
+        .context("Linux target")
+    }
+
+    /// A session whose newest reply proposes `blocks`, asked at terminal revision 7.
+    fn proposing(blocks: &[(&str, &str)]) -> Result<Session> {
+        let text: String = blocks
+            .iter()
+            .map(|(language, command)| format!("```{language}\n{command}\n```\n"))
+            .collect();
         let mut session = Session::new();
         let (request, _) = session.begin("inspect target".into(), 7, None)?;
-        session
-            .accept(
-                session.id,
-                request,
-                Ok(Reply {
-                    commands: crate::command::proposals(&text),
-                    text,
-                    tools: vec![],
-                    message: None,
-                }),
-            )
-            .context("reply")?;
-        let entry = session.entries.last_mut().context("entry")?;
-        for state in [
-            AutomationState::ShellUnavailable,
-            AutomationState::TerminalChanged,
-        ] {
-            let mut pending = entry.clone();
-            assert!(pending.prepare_automatic(&environment, state).is_empty());
-            assert!(
-                matches!(&pending.commands[0].state, CommandState::Deferred(reason) if !reason.is_empty())
-            );
-        }
-        let dispatch = entry.prepare_automatic(&environment, AutomationState::Ready);
-        assert_eq!(dispatch.len(), 3);
-        assert_eq!(
-            dispatch[0].1,
-            crate::command::prepare_read_only(diagnostic)?
-        );
-        let mut mac = Session::new();
-        let text = "```sh\nfree -h\n```\n```sh\nvm_stat\n```".to_string();
-        let (request, _) = mac.begin("memory".into(), 1, None)?;
-        mac.accept(
-            mac.id,
+        let revision = session.accept(
+            session.id,
             request,
             Ok(Reply {
                 commands: crate::command::proposals(&text),
@@ -528,48 +652,264 @@ mod tests {
                 tools: vec![],
                 message: None,
             }),
-        )
-        .context("macOS reply")?;
-        let macos = crate::session_environment::Environment {
-            operating_system: crate::session_environment::Platform::MacOs,
-            startup_shell: Some("/bin/zsh".into()),
-            ..Default::default()
-        };
-        let mac_entry = mac.entries.last_mut().context("macOS entry")?;
-        let mac_dispatch = mac_entry.prepare_automatic(&macos, AutomationState::Ready);
-        assert_eq!(mac_dispatch.len(), 1, "only the macOS command is sent");
-        assert_eq!(mac_dispatch[0].0, mac_entry.commands[1].id);
-        assert!(
-            matches!(&mac_entry.commands[0].state, CommandState::Deferred(reason) if reason.contains("macOS")),
-            "a Linux-only command explains why it stayed manual"
         );
-        for index in [1, 2, 3, 6] {
-            assert!(
-                !dispatch
+        assert_eq!(revision, Some(7));
+        Ok(session)
+    }
+
+    fn states(session: &Session) -> Vec<CommandState> {
+        session
+            .entries
+            .last()
+            .map(|entry| {
+                entry
+                    .commands
                     .iter()
-                    .any(|(id, _)| *id == entry.commands[index].id)
+                    .map(|command| command.state.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn verdict(allow: bool, reason: &str) -> Verdict {
+        Verdict {
+            allow,
+            reason: reason.into(),
+        }
+    }
+
+    fn deferred(state: &CommandState, part: &str) -> bool {
+        matches!(state, CommandState::Deferred(reason) if reason.contains(part))
+    }
+
+    #[test]
+    fn reviews_gate_locally_then_send_only_what_the_model_allows() -> Result<()> {
+        let environment = linux()?;
+        let diagnostic = "kubectl get pods -A | awk '$4 != \"Running\"'";
+        let blocks = [
+            ("bash", diagnostic),
+            ("powershell", "Get-Process"),
+            ("sh", "rm file"),
+            ("sh", "docker ps"),
+            ("sh", "go env"),
+            ("sh", "id"),
+        ];
+        for state in [
+            AutomationState::ShellUnavailable,
+            AutomationState::TerminalChanged,
+        ] {
+            let mut session = proposing(&blocks)?;
+            assert!(
+                session.begin_review(&environment, state, 7).is_none(),
+                "nothing is reviewed while the terminal cannot take a command"
+            );
+            assert!(!session.reviewing());
+            assert!(states(&session).iter().all(|state| deferred(state, "")));
+        }
+        let mut session = proposing(&blocks)?;
+        let id = session.id;
+        let review = session
+            .begin_review(&environment, AutomationState::Ready, 7)
+            .context("review")?;
+        assert_eq!(
+            review.commands,
+            [diagnostic, "rm file", "docker ps", "go env", "id"],
+            "any program reaches the model; only the other shell's block is held back"
+        );
+        let reviewing = states(&session);
+        assert!(deferred(&reviewing[1], "Shell"));
+        for index in [0, 2, 3, 4, 5] {
+            assert_eq!(reviewing[index], CommandState::Reviewing);
+        }
+        // Verdicts for another session or review are not this review's verdicts.
+        for (session_id, review_id) in [(Uuid::new_v4(), review.id), (id, Uuid::new_v4())] {
+            assert!(!session.finish_review(
+                session_id,
+                review_id,
+                Ok(vec![verdict(true, ""); 5]),
+                |_, _| panic!("stale verdicts must not send"),
+            ));
+        }
+        let mut sent = Vec::new();
+        assert!(session.finish_review(
+            id,
+            review.id,
+            Ok(vec![
+                verdict(true, "lists pods"),
+                verdict(false, "deletes a file"),
+                verdict(true, "lists containers"),
+                verdict(true, "prints settings"),
+                verdict(true, "prints the user"),
+            ]),
+            |revision, commands| {
+                assert_eq!(
+                    revision, 7,
+                    "sent against the terminal state of the question"
+                );
+                sent = commands.iter().map(|command| command.to_string()).collect();
+                Ok(())
+            },
+        ));
+        assert_eq!(
+            sent,
+            [diagnostic, "docker ps", "go env"],
+            "unchanged text, reply order"
+        );
+        let finished = states(&session);
+        for index in [0, 3, 4] {
+            assert_eq!(finished[index], CommandState::Sent);
+        }
+        assert!(
+            deferred(&finished[2], "deletes a file"),
+            "the model's reason is shown"
+        );
+        assert!(
+            deferred(&finished[5], "3"),
+            "the fourth allowed command waits for a click"
+        );
+        assert!(!session.reviewing());
+        assert!(
+            !session.finish_review(id, review.id, Ok(vec![verdict(true, ""); 5]), |_, _| {
+                panic!("a review is applied once")
+            }),
+        );
+        assert!(
+            session
+                .begin_review(&environment, AutomationState::Ready, 7)
+                .is_none(),
+            "sent and refused commands are not reviewed again"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_reviews_and_refused_sends_leave_every_command_manual() -> Result<()> {
+        let environment = linux()?;
+        let blocks = [("sh", "uptime"), ("sh", "df -h")];
+        // The model could not be asked or did not answer in the expected form.
+        for failure in [
+            Err(anyhow::anyhow!("只读校验超时")),
+            Ok(vec![verdict(true, "")]),
+            Ok(vec![verdict(true, ""); 3]),
+        ] {
+            let mut session = proposing(&blocks)?;
+            let review = session
+                .begin_review(&environment, AutomationState::Ready, 7)
+                .context("review")?;
+            assert!(
+                session.finish_review(session.id, review.id, failure, |_, _| {
+                    panic!("an unfinished review must not send")
+                })
             );
             assert!(
-                matches!(&entry.commands[index].state, CommandState::Deferred(reason) if !reason.is_empty())
+                states(&session)
+                    .iter()
+                    .all(|state| deferred(state, "只读校验未完成"))
             );
         }
-        assert_eq!(entry.commands[1].language.as_deref(), Some("powershell"));
-        for (id, _) in dispatch {
-            entry
-                .commands
-                .iter_mut()
-                .find(|command| command.id == id)
-                .context("dispatched command")?
-                .state = CommandState::Sent;
-        }
-        let mut already_sent = entry.clone();
-        already_sent
-            .commands
-            .retain(|command| command.state == CommandState::Sent);
+        // The terminal refused the submission.
+        let mut session = proposing(&blocks)?;
+        let review = session
+            .begin_review(&environment, AutomationState::Ready, 7)
+            .context("review")?;
+        assert!(session.finish_review(
+            session.id,
+            review.id,
+            Ok(vec![verdict(true, ""); 2]),
+            |_, _| anyhow::bail!("终端状态已变化，请手动执行"),
+        ));
         assert!(
-            already_sent
-                .prepare_automatic(&environment, AutomationState::Ready)
-                .is_empty()
+            states(&session)
+                .iter()
+                .all(|state| deferred(state, "终端状态已变化"))
+        );
+        // A command the user clicked during the review is not sent a second time.
+        let mut session = proposing(&blocks)?;
+        let review = session
+            .begin_review(&environment, AutomationState::Ready, 7)
+            .context("review")?;
+        session.entries[1].commands[0].state = CommandState::Sent;
+        let mut sent = Vec::new();
+        assert!(session.finish_review(
+            session.id,
+            review.id,
+            Ok(vec![verdict(true, ""); 2]),
+            |_, commands| {
+                sent = commands.iter().map(|command| command.to_string()).collect();
+                Ok(())
+            },
+        ));
+        assert_eq!(sent, ["df -h"]);
+        // Oversized commands never leave the application.
+        let long = format!("echo {}", "x".repeat(command_review::MAX_COMMAND_BYTES));
+        let mut session = proposing(&[("sh", &long), ("sh", "uptime")])?;
+        let review = session
+            .begin_review(&environment, AutomationState::Ready, 7)
+            .context("review")?;
+        assert_eq!(review.commands, ["uptime"]);
+        assert!(deferred(&states(&session)[0], "过长"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_question_stop_reset_and_end_abandon_the_review() -> Result<()> {
+        let environment = linux()?;
+        type Abandon = fn(&mut Session) -> Result<()>;
+        let abandon: [(&str, Abandon); 5] = [
+            ("question", |session| {
+                session.begin("next".into(), 8, None).map(|_| ())
+            }),
+            ("stop", |session| {
+                session.stop();
+                Ok(())
+            }),
+            ("option off", |session| {
+                session.cancel_review();
+                Ok(())
+            }),
+            ("reset", |session| {
+                session.reset();
+                Ok(())
+            }),
+            ("end", |session| {
+                session.end();
+                Ok(())
+            }),
+        ];
+        for (name, abandon) in abandon {
+            let mut session = proposing(&[("sh", "uptime")])?;
+            let id = session.id;
+            let review = session
+                .begin_review(&environment, AutomationState::Ready, 7)
+                .context("review")?;
+            abandon(&mut session)?;
+            assert!(
+                review.cancel.is_cancelled(),
+                "{name} cancels the model request"
+            );
+            assert!(!session.reviewing());
+            if let Some(command) = session
+                .entries
+                .get(1)
+                .and_then(|entry| entry.commands.first())
+            {
+                assert!(deferred(&command.state, "已取消"), "{name}");
+            }
+            assert!(
+                !session.finish_review(id, review.id, Ok(vec![verdict(true, "")]), |_, _| {
+                    panic!("{name}: a late verdict must not send")
+                }),
+            );
+        }
+        let mut session = proposing(&[("sh", "uptime")])?;
+        let review = session
+            .begin_review(&environment, AutomationState::Ready, 7)
+            .context("review")?;
+        let cancel = review.cancel.clone();
+        drop(session);
+        assert!(
+            cancel.is_cancelled(),
+            "closing the pane cancels the model request"
         );
         Ok(())
     }

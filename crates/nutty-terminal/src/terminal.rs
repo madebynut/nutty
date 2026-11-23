@@ -452,22 +452,7 @@ impl Engine {
     }
 
     pub fn environment(&self) -> crate::session_environment::Environment {
-        let core = self.core.lock().expect("terminal state lock poisoned");
-        let mut environment = if let Some(observed) = &core.shell.environment {
-            observed.clone()
-        } else if core.environment.target == crate::session_environment::Target::Ssh
-            && core
-                .shell
-                .target
-                .as_ref()
-                .is_some_and(|target| !target.transport_bound)
-        {
-            crate::session_environment::Environment::unknown_ssh()
-        } else {
-            core.environment.clone()
-        };
-        environment.last_observed_directory = core.shell.directory.clone();
-        environment
+        current_environment(&self.core.lock().expect("terminal state lock poisoned"))
     }
 
     pub fn close_input(&self) {
@@ -1093,6 +1078,19 @@ impl Engine {
         let bracketed = core.term.mode().contains(TermMode::BRACKETED_PASTE);
         let bytes = if bracketed {
             format!("\x1b[200~{command}\x1b[201~\r").into_bytes()
+        } else if revision.is_some() && command.contains(['\n', '\t']) {
+            // Without bracketed paste each line is typed on its own: a program started by
+            // an earlier line could read the later lines as its input, and a tab asks the
+            // line editor for completion. Nobody watches an automatic send, so the lines
+            // go as one brace group, which the shell reads to its end before running any
+            // of it.
+            ensure!(
+                !command.contains('\t')
+                    && !command.trim_end().ends_with('\\')
+                    && reads_brace_groups(&current_environment(&core)),
+                "此终端未启用括号粘贴，无法自动发送多行或含制表符的命令，请点击执行"
+            );
+            format!("{{\r{}\r}}\r", command.replace('\n', "\r")).into_bytes()
         } else {
             format!("{}\r", command.replace('\n', "\r")).into_bytes()
         };
@@ -1603,6 +1601,32 @@ fn record_command(core: &mut Core, command: &str) {
     }
 }
 
+fn current_environment(core: &Core) -> crate::session_environment::Environment {
+    let mut environment = if let Some(observed) = &core.shell.environment {
+        observed.clone()
+    } else if core.environment.target == crate::session_environment::Target::Ssh
+        && core
+            .shell
+            .target
+            .as_ref()
+            .is_some_and(|target| !target.transport_bound)
+    {
+        crate::session_environment::Environment::unknown_ssh()
+    } else {
+        core.environment.clone()
+    };
+    environment.last_observed_directory = core.shell.directory.clone();
+    environment
+}
+
+/// Shells known to read a `{ … }` group completely before running it. An unidentified
+/// shell may be csh or another family where the braces mean something else.
+fn reads_brace_groups(environment: &crate::session_environment::Environment) -> bool {
+    ["bash", "sh", "zsh", "dash", "ash", "ksh", "mksh"]
+        .iter()
+        .any(|shell| environment.shell_is(shell))
+}
+
 fn empty_prompt(core: &Core) -> bool {
     let point = core.term.grid().cursor.point;
     core.shell.integrated
@@ -1696,7 +1720,7 @@ mod tests {
             .engine
             .set_environment(crate::session_environment::Environment::unknown_ssh());
         terminal.engine.feed(b"admin@target:~$ ");
-        let command = nutty_core::command::automatic_read_only("pwd").expect("read-only command");
+        let command = "pwd";
         for suffix in ["", "printf PENDING #", "echo $", "printf pending %"] {
             terminal.engine.feed(b"\r\x1b[2Kadmin@target:~$ ");
             terminal.engine.input(suffix.as_bytes().to_vec())?;
@@ -1710,7 +1734,7 @@ mod tests {
             assert!(
                 terminal
                     .engine
-                    .send_automatic_command(&command, revision)
+                    .send_automatic_command(command, revision)
                     .is_err()
             );
             assert!(input.try_recv().is_err(), "no appended input");
@@ -1720,7 +1744,7 @@ mod tests {
         terminal.engine.feed(b"\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
         let revision = terminal.engine.snapshot().automation_revision;
         assert!(terminal.engine.automatic_command_ready(revision));
-        terminal.engine.send_automatic_command(&command, revision)?;
+        terminal.engine.send_automatic_command(command, revision)?;
         assert!(matches!(input.try_recv()?, Command::Input(_)));
         Ok(())
     }
@@ -2316,6 +2340,145 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn automatic_multiline_commands_without_bracketed_paste_are_sent_as_one_group() -> Result<()> {
+        let shell = |shell: Option<&str>| crate::session_environment::Environment {
+            target: crate::session_environment::Target::Local,
+            operating_system: crate::session_environment::Platform::Linux,
+            startup_shell: shell.map(Into::into),
+            ..Default::default()
+        };
+        let (terminal, receiver) = Terminal::channel(&Preferences::default(), "group".into());
+        let sent = |command: &str, automatic: bool| -> Result<Option<Vec<u8>>> {
+            terminal
+                .engine
+                .feed(b"\r\n\x1b]133;D\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+            let revision = terminal.engine.snapshot().automation_revision;
+            ensure!(terminal.engine.automatic_command_ready(revision));
+            let result = if automatic {
+                terminal.engine.send_automatic_command(command, revision)
+            } else {
+                terminal.engine.send_command(command)
+            };
+            Ok(match result {
+                Ok(()) => match receiver.try_recv()? {
+                    Command::Input(bytes) => Some(bytes),
+                    other => anyhow::bail!("unexpected submission: {other:?}"),
+                },
+                Err(_) => {
+                    ensure!(receiver.try_recv().is_err(), "a refusal sends nothing");
+                    None
+                }
+            })
+        };
+        let script = "uname -a\nless /etc/hosts\nq";
+        terminal.engine.set_environment(shell(Some("/bin/bash")));
+        assert_eq!(
+            sent(script, true)?.as_deref(),
+            Some(b"{\runame -a\rless /etc/hosts\rq\r}\r".as_slice()),
+            "a pager started by one line must not read the next line as keystrokes"
+        );
+        assert_eq!(
+            terminal
+                .engine
+                .command_history()
+                .last()
+                .map(|entry| entry.command.clone()),
+            Some(script.to_string()),
+            "history keeps the command as proposed"
+        );
+        assert_eq!(
+            sent("pwd", true)?.as_deref(),
+            Some(b"pwd\r".as_slice()),
+            "one line needs no group"
+        );
+        assert_eq!(
+            sent(script, false)?.as_deref(),
+            Some(b"uname -a\rless /etc/hosts\rq\r".as_slice()),
+            "a clicked command is typed as before"
+        );
+        assert_eq!(
+            sent("printf 'a\tb'", true)?,
+            None,
+            "a tab would ask for completion"
+        );
+        assert_eq!(
+            sent("ls \\\n-la \\", true)?,
+            None,
+            "a trailing backslash would swallow the brace"
+        );
+        for other in [Some("/usr/bin/fish"), Some("/bin/tcsh"), Some("pwsh"), None] {
+            terminal.engine.set_environment(shell(other));
+            assert_eq!(
+                sent(script, true)?,
+                None,
+                "{other:?} is not known to group with braces"
+            );
+            assert!(
+                sent("pwd", true)?.is_some(),
+                "{other:?} still takes one line"
+            );
+        }
+        terminal
+            .engine
+            .set_environment(shell(Some("/usr/bin/fish")));
+        terminal.engine.feed(b"\x1b[?2004h");
+        assert_eq!(
+            sent(script, true)?.as_deref(),
+            Some(format!("\x1b[200~{script}\x1b[201~\r").as_bytes()),
+            "bracketed paste delivers every line as one submission"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_multiline_commands_run_completely_in_a_real_pty() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let preferences = Preferences {
+            directory: directory.path().into(),
+            shell: "/bin/sh".into(),
+            ..Default::default()
+        };
+        let terminal = Terminal::local(&preferences)?;
+        terminal
+            .engine
+            .input(b"PS1=\"$(printf '\\033]133;A\\007$ \\033]133;B\\007')\"\r".to_vec())?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let revision = loop {
+            let revision = terminal.engine.snapshot().automation_revision;
+            if terminal.engine.automatic_command_ready(revision) {
+                break revision;
+            }
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "shell did not reach a prompt"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        // `cat` would read the following lines as its input if they were typed one by one.
+        terminal.engine.send_automatic_command(
+            "cat <<'EOF' # first\nheredoc $HOME line\nEOF\ncat </dev/null\nprintf '%s-%s\\n' group done",
+            revision,
+        )?;
+        loop {
+            let output = terminal.engine.recent_output();
+            if output.lines().any(|line| line == "group-done") {
+                ensure!(
+                    output.lines().any(|line| line == "heredoc $HOME line"),
+                    "here-document was not delivered intact: {output}"
+                );
+                break;
+            }
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "automatic group did not finish: {output}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn automatic_pipeline_executes_in_a_real_pty_after_scrolling_and_selection() -> Result<()> {
@@ -2343,9 +2506,9 @@ mod tests {
         };
         terminal.engine.scroll(Scroll::Delta(2));
         terminal.engine.select(0, 0, false, SelectionType::Simple);
-        let command =
-            crate::command::automatic_read_only("pwd | head -n 1").context("read-only pipeline")?;
-        terminal.engine.send_automatic_command(&command, revision)?;
+        terminal
+            .engine
+            .send_automatic_command("pwd | head -n 1", revision)?;
         let expected = std::fs::canonicalize(directory.path())?
             .to_string_lossy()
             .into_owned();

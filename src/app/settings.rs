@@ -1661,7 +1661,7 @@ impl WorkspaceView {
         let proxy_record =
             id.and_then(|id| self.store.profile.proxies.iter().find(|item| item.id == id));
         let id = id.unwrap_or_else(Uuid::new_v4);
-        let kind = provider.map(|item| item.kind).unwrap_or_default();
+        let kind = provider.map(|item| item.kind).unwrap_or(Kind::ALL[0]);
         let proxy_url = proxy_record.and_then(|proxy| url::Url::parse(&proxy.url).ok());
         let proxy_host = proxy_url
             .as_ref()
@@ -1725,7 +1725,7 @@ impl WorkspaceView {
                 .collect()
         };
         let protocol_index = if page == SettingsPage::Providers {
-            kind as usize
+            Kind::ALL.iter().position(|item| *item == kind).unwrap_or(0)
         } else {
             proxy_protocol
         };

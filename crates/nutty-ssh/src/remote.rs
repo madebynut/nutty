@@ -1378,7 +1378,7 @@ impl Node {
             let mut files = Vec::new();
             let mut name_bytes = 0;
             loop {
-                match raw.readdir(handle.as_str()).await {
+                match raw.readdir(&handle).await {
                     Ok(page) => {
                         ensure!(
                             files.len() + page.files.len() <= 100_000,

@@ -15,12 +15,14 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The order of the provider type list in settings; a new provider starts as the
+    /// first entry. Saved profiles name the type, so this order can change freely.
     pub const ALL: [Self; 5] = [
+        Self::DeepSeek,
         Self::OpenAi,
         Self::Anthropic,
         Self::Gemini,
         Self::Ollama,
-        Self::DeepSeek,
     ];
     pub fn label(self) -> &'static str {
         match self {

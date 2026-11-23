@@ -276,6 +276,62 @@ async fn recursive_transfer_is_atomic_bounded_and_preserves_links_and_modes() ->
     assert!(!dir.path().join(format!(".nutty-{}.part", j.id)).exists());
     Ok(())
 }
+/// A link on an OpenSSH server arrives as a link, not as a copy of what it points to.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn links_on_a_native_server_are_downloaded_as_links() -> Result<()> {
+    use std::process::Stdio;
+    let dir = tempfile::tempdir()?;
+    let src = dir.path().join("source");
+    let dest = dir.path().join("copy");
+    tokio::fs::create_dir_all(src.join("real")).await?;
+    tokio::fs::write(src.join("real/file"), b"payload").await?;
+    let links = [
+        ("link", "real/file"),
+        ("dir-link", "real"),
+        ("dangling", "missing"),
+    ];
+    for (name, target) in links {
+        tokio::fs::symlink(target, src.join(name)).await?;
+    }
+    let mut child = tokio::process::Command::new("/usr/libexec/sftp-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let raw = russh_sftp::client::RawSftpSession::new(tokio::io::join(
+        child.stdout.take().context("stdout")?,
+        child.stdin.take().context("stdin")?,
+    ));
+    raw.init().await?;
+    let mut j = fixture(dir.path(), &src, &dest).await?;
+    j.execute(
+        dir.path(),
+        &Endpoint::Remote(Arc::new(raw)),
+        &Endpoint::Local,
+        &progress(),
+        &CancellationToken::new(),
+    )
+    .await?;
+    assert_eq!(j.state, State::Complete);
+    assert_eq!(tokio::fs::read(dest.join("real/file")).await?, b"payload");
+    for (name, target) in links {
+        let path = dest.join(name);
+        assert!(
+            std::fs::symlink_metadata(&path)?.file_type().is_symlink(),
+            "{name} must stay a link"
+        );
+        assert_eq!(
+            Endpoint::Local
+                .read_link(path.to_str().context("path")?)
+                .await?,
+            target
+        );
+    }
+    let _ = child.kill().await;
+    Ok(())
+}
 #[tokio::test]
 async fn symlink_target_kind_follows_directories_files_and_dangling_links() -> Result<()> {
     let dir = tempfile::tempdir()?;
